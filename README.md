@@ -105,6 +105,84 @@ Requires JDK 25 or newer. Maven is provided by the wrapper.
 mvnw.cmd verify      # Windows
 ```
 
+## Install
+
+Download the installer for your system from the repository's Releases page. Each package contains two programs: **MRemora Agent** (share this computer's screen) and **MRemora Viewer** (connect to someone else's computer).
+
+### Windows
+
+1. Run `MRemora-setup-<version>.exe`. The installer is unsigned, so SmartScreen may warn you: click "More info" and then "Run anyway".
+2. It installs per user and needs no administrator rights. Shortcuts are added to the Desktop and the Start menu.
+3. Start **MRemora Agent** on the machine you want to control and allow it through Windows Firewall when prompted.
+
+**Firewall and network profile.** Windows 11 marks a newly joined Wi-Fi network as *Public* by default, and an app allowed only on private networks is then still blocked. Either set the network to Private (Settings → Network & internet → Wi-Fi or Ethernet → the network's Properties → *Private network*), or allow MRemora Agent on public networks too. If you clicked Cancel in the firewall prompt, fix it in Windows Security → Firewall & network protection → *Allow an app through firewall*: find MRemora Agent and tick the network types you need.
+
+### Linux
+
+Ubuntu 24.04+ or Debian 13+:
+
+```bash
+sudo apt install ./mremora_<version>_amd64.deb
+```
+
+The package adds two menu entries: "MRemora Agent" and "MRemora Viewer".
+
+On Wayland, the agent shows a system screen-sharing dialog that you must accept. If the mouse does not move on the controlled machine, log in with the "Ubuntu on Xorg" session instead.
+
+### How to connect
+
+1. Start **MRemora Agent** on the machine to be controlled. It shows its IP address, the port and a 6-digit code.
+2. Start **MRemora Viewer** on the other machine, enter the IP address and the code, and connect.
+
+### Logs
+
+The agent writes `agent0.log` and the viewer `viewer0.log` (older runs rotate to `agent1.log`, `agent2.log`, ...):
+
+- Windows: `%LOCALAPPDATA%\MRemora\logs`
+- Linux: `$XDG_STATE_HOME/mremora/logs`, or `~/.local/state/mremora/logs` if `XDG_STATE_HOME` is not set
+
+### Build packages
+
+Build the app-image first, then the package for the same system:
+
+```bash
+scripts/build-app-image.sh 0.1.0         # 1. jpackage app-image with both programs (app version X.Y.Z)
+scripts/build-deb.sh 0.1.0               # 2a. Linux: .deb, same version as the app-image
+scripts/build-installer.sh 2026.11.25.1  # 2b. Windows (Git Bash, needs NSIS): setup.exe, version YYYY.MM.DD.N
+```
+
+A merge into `main` builds both packages and publishes them as a GitHub Release. To get test builds from another branch, run the Release workflow manually (Actions → Release → Run workflow); that only uploads artifacts.
+
+## Run from source
+
+Start the agent on the controlled machine. It opens a small always-on-top window with a 6-digit pairing code and listens on port 7420.
+
+```bash
+./mvnw -q install -DskipTests                                   # Linux, once
+./mvnw -q -pl mremora-agent exec:java
+./mvnw -q -pl mremora-agent exec:java -Dexec.args="--port 7500" # custom port
+```
+
+```bat
+mvnw.cmd -q install -DskipTests
+mvnw.cmd -q -pl mremora-agent exec:java
+mvnw.cmd -q -pl mremora-agent exec:java -Dexec.args="--port 7500"
+```
+
+Then start the viewer on the controlling machine. Enter the agent's IP address and the code shown in its window; the port defaults to 7420.
+
+```bash
+./mvnw -q install -DskipTests                                   # Linux, once (skip if already done)
+./mvnw -q -pl mremora-viewer javafx:run
+```
+
+```bat
+mvnw.cmd -q install -DskipTests
+mvnw.cmd -q -pl mremora-viewer javafx:run
+```
+
+On Windows, allow the agent through Windows Firewall when prompted on the first start, otherwise other machines on the LAN cannot connect (see the firewall note under [Windows](#windows) if the network is Public).
+
 ## Tech stack
 
 Java 25 · Netty · Foreign Function & Memory API · JavaFX · Redis · Micrometer · Prometheus · JUnit 6 · JMH · Testcontainers · Docker · Kubernetes · GitHub Actions
