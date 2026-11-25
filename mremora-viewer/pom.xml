@@ -28,6 +28,10 @@
             <artifactId>netty-handler</artifactId>
         </dependency>
         <dependency>
+            <groupId>org.openjfx</groupId>
+            <artifactId>javafx-controls</artifactId>
+        </dependency>
+        <dependency>
             <groupId>pl.mtech.mremora</groupId>
             <artifactId>mremora-agent</artifactId>
             <scope>test</scope>
@@ -38,4 +42,16 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.openjfx</groupId>
+                <artifactId>javafx-maven-plugin</artifactId>
+                <configuration>
+                    <mainClass>pl.mtech.mremora.viewer.ViewerMain</mainClass>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 </project>
