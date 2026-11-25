@@ -21,3 +21,6 @@ docs/
 .playwright-mcp/
 playwright-report/
 test-results/
+
+# Packaging output (scripts/build-app-image.sh)
+dist/

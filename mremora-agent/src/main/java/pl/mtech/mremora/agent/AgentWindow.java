@@ -1,6 +1,7 @@
 package pl.mtech.mremora.agent;
 
 import java.awt.Component;
+import java.awt.Font;
 import java.awt.Frame;
 import java.awt.GraphicsEnvironment;
 import java.awt.Rectangle;
@@ -9,6 +10,7 @@ import java.awt.event.WindowEvent;
 import java.lang.System.Logger;
 import java.lang.reflect.InvocationTargetException;
 import java.time.Duration;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.swing.BorderFactory;
@@ -36,6 +38,8 @@ public final class AgentWindow implements AgentUi {
     private final JFrame frame = new JFrame("MRemora");
     private final JLabel title = new JLabel();
     private final JLabel subtitle = new JLabel();
+    private final JLabel address = new JLabel();
+    private final JLabel moreAddresses = new JLabel();
     private final JButton endButton = new JButton("End session");
     private final Runnable onQuit;
 
@@ -52,9 +56,16 @@ public final class AgentWindow implements AgentUi {
         panel.setBorder(BorderFactory.createEmptyBorder(10, 16, 10, 16));
         title.setAlignmentX(Component.CENTER_ALIGNMENT);
         subtitle.setAlignmentX(Component.CENTER_ALIGNMENT);
+        address.setAlignmentX(Component.CENTER_ALIGNMENT);
+        moreAddresses.setAlignmentX(Component.CENTER_ALIGNMENT);
+        moreAddresses.setFont(moreAddresses.getFont().deriveFont(Font.PLAIN, moreAddresses.getFont().getSize2D() - 2));
+        address.setVisible(false);
+        moreAddresses.setVisible(false);
         endButton.setAlignmentX(Component.CENTER_ALIGNMENT);
         panel.add(title);
         panel.add(subtitle);
+        panel.add(address);
+        panel.add(moreAddresses);
         panel.add(Box.createVerticalStrut(8));
         panel.add(endButton);
         frame.add(panel);
@@ -137,6 +148,28 @@ public final class AgentWindow implements AgentUi {
         });
     }
 
+    /**
+     * Shows where a viewer can connect, below the status text in every state. Any thread.
+     *
+     * @param addresses best first; the first is shown prominently, the rest on one smaller line
+     * @param port the port the agent actually listens on
+     */
+    public void showAddresses(List<String> addresses, int port) {
+        List<String> copy = List.copyOf(addresses);
+        SwingUtilities.invokeLater(() -> {
+            if (copy.isEmpty()) {
+                address.setText("No network connection");
+                moreAddresses.setText("");
+            } else {
+                address.setText("Connect to: " + copy.get(0) + " (port " + port + ")");
+                moreAddresses.setText(copy.size() > 1 ? "also: " + String.join(", ", copy.subList(1, copy.size())) : "");
+            }
+            address.setVisible(true);
+            moreAddresses.setVisible(!moreAddresses.getText().isEmpty());
+            relayout();
+        });
+    }
+
     /** Closes the window without invoking any callback. */
     public void close() {
         SwingUtilities.invokeLater(() -> {
@@ -150,7 +183,10 @@ public final class AgentWindow implements AgentUi {
     }
 
     String statusText() {
-        return title.getText() + (subtitle.getText().isEmpty() ? "" : "\n" + subtitle.getText());
+        return title.getText()
+                + (subtitle.getText().isEmpty() ? "" : "\n" + subtitle.getText())
+                + (address.isVisible() ? "\n" + address.getText() : "")
+                + (moreAddresses.isVisible() ? "\n" + moreAddresses.getText() : "");
     }
 
     private void endSession() {
@@ -174,6 +210,10 @@ public final class AgentWindow implements AgentUi {
         subtitle.setText(subtitleText);
         subtitle.setVisible(!subtitleText.isEmpty());
         endButton.setVisible(sessionActive);
+        relayout();
+    }
+
+    private void relayout() {
         frame.pack();
         Rectangle screen = GraphicsEnvironment.getLocalGraphicsEnvironment()
                 .getDefaultScreenDevice()
