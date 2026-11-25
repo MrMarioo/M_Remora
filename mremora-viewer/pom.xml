@@ -19,5 +19,23 @@
             <groupId>pl.mtech.mremora</groupId>
             <artifactId>mremora-protocol</artifactId>
         </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-handler</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>pl.mtech.mremora</groupId>
+            <artifactId>mremora-agent</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>pl.mtech.mremora</groupId>
+            <artifactId>mremora-testkit</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 </project>

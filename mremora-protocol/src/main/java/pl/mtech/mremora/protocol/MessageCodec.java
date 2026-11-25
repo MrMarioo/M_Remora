@@ -125,11 +125,27 @@ public final class MessageCodec {
      * @throws ProtocolException when the bytes can never form a valid frame
      */
     public Optional<Message> decode(ByteBuffer in) {
+        return decode(in, MAX_FRAME_LENGTH);
+    }
+
+    /**
+     * Like {@link #decode(ByteBuffer)} but rejects frames whose length field exceeds
+     * {@code maxFrameLength}, as soon as the length field is readable.
+     *
+     * @param maxFrameLength largest accepted length field, in {@code [2, MAX_FRAME_LENGTH]}
+     * @throws IllegalArgumentException when {@code maxFrameLength} is outside that range
+     * @throws ProtocolException when the bytes can never form a valid frame within the limit
+     */
+    public Optional<Message> decode(ByteBuffer in, int maxFrameLength) {
+        if (maxFrameLength < TYPE_AND_FLAGS || maxFrameLength > MAX_FRAME_LENGTH) {
+            throw new IllegalArgumentException(
+                    "maxFrameLength must be %d..%d, was %d".formatted(TYPE_AND_FLAGS, MAX_FRAME_LENGTH, maxFrameLength));
+        }
         if (in.remaining() < LENGTH_FIELD) {
             return Optional.empty();
         }
         int length = in.getInt(in.position()); // peek, don't consume
-        if (length < TYPE_AND_FLAGS || length > MAX_FRAME_LENGTH) {
+        if (length < TYPE_AND_FLAGS || length > maxFrameLength) {
             throw new ProtocolException("Invalid frame length " + length);
         }
         if (in.remaining() < LENGTH_FIELD + length) {

@@ -8,6 +8,9 @@ import java.util.Objects;
  */
 public record Hello(int protocolVersion, Role role, String pairingCode) implements Message {
 
+    /** Current wire protocol version. */
+    public static final int PROTOCOL_VERSION = 1;
+
     public enum Role { AGENT, VIEWER }
 
     public Hello {
