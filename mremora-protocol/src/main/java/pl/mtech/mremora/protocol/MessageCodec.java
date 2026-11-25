@@ -1,0 +1,233 @@
+package pl.mtech.mremora.protocol;
+
+import java.nio.BufferUnderflowException;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
+import java.util.Optional;
+
+/**
+ * Encodes and decodes framed messages.
+ *
+ * <p>Frame layout, big-endian:
+ * <pre>
+ * [u32 length][u8 type][u8 flags][payload]
+ * </pre>
+ * {@code length} counts every byte after the length field itself. Strings are
+ * {@code [u16 byte length][UTF-8 bytes]}. Payload layouts are pinned by {@code MessageWireFormatTest}.
+ * Flags are reserved and must be 0. Hello is the only extensible message: a decoder ignores
+ * bytes after the fields it knows, so newer peers can add fields without breaking negotiation.
+ *
+ * <p>Stateless and thread-safe. Knows nothing about sockets or Netty.
+ */
+public final class MessageCodec {
+
+    /** Largest accepted value of the length field. */
+    public static final int MAX_FRAME_LENGTH = 16 * 1024 * 1024;
+
+    private static final int LENGTH_FIELD = 4;
+    private static final int TYPE_AND_FLAGS = 2;
+    private static final int MAX_STRING_BYTES = 0xFFFF;
+
+    // ---------------------------------------------------------------- encode
+
+    /**
+     * @throws IllegalArgumentException when the message cannot be represented on the wire
+     *         (a string over 65535 UTF-8 bytes, a frame over {@link #MAX_FRAME_LENGTH})
+     */
+    public ByteBuffer encode(Message message) {
+        return switch (message) {
+            case Hello(int version, Hello.Role role, String code) -> {
+                byte[] codeBytes = utf8(code);
+                yield frame(MessageType.HELLO, 2 + 1 + 2 + codeBytes.length)
+                        .putShort((short) u16(version, "protocol version"))
+                        .put(roleCode(role))
+                        .putShort((short) codeBytes.length).put(codeBytes)
+                        .flip();
+            }
+            case ScreenInfo(int width, int height, int scale) -> frame(MessageType.SCREEN_INFO, 4 + 4 + 2)
+                    .putInt(width).putInt(height).putShort((short) u16(scale, "scale percent"))
+                    .flip();
+            case FrameUpdate update -> frame(MessageType.FRAME_UPDATE, 8 + 1 + update.dataLength())
+                    .putLong(update.sequence()).put(formatCode(update.format())).put(update.data())
+                    .flip();
+            case MouseMove(int x, int y) -> frame(MessageType.MOUSE_MOVE, 8).putInt(x).putInt(y).flip();
+            case MouseButton(MouseButton.Button button, boolean pressed) -> frame(MessageType.MOUSE_BUTTON, 2)
+                    .put(buttonCode(button)).put((byte) (pressed ? 1 : 0))
+                    .flip();
+            case MouseWheel(int notches) -> frame(MessageType.MOUSE_WHEEL, 4).putInt(notches).flip();
+            case Heartbeat() -> frame(MessageType.HEARTBEAT, 0).flip();
+            case Bye(String reason) -> {
+                byte[] reasonBytes = utf8(reason);
+                yield frame(MessageType.BYE, 2 + reasonBytes.length)
+                        .putShort((short) reasonBytes.length).put(reasonBytes)
+                        .flip();
+            }
+        };
+    }
+
+    private static ByteBuffer frame(MessageType type, int payloadLength) {
+        int length = TYPE_AND_FLAGS + payloadLength;
+        if (length > MAX_FRAME_LENGTH) {
+            throw new IllegalArgumentException("%s frame of %d bytes exceeds limit %d".formatted(type, length, MAX_FRAME_LENGTH));
+        }
+        return ByteBuffer.allocate(LENGTH_FIELD + length)
+                .putInt(length)
+                .put((byte) type.code)
+                .put((byte) 0);
+    }
+
+    private static byte[] utf8(String s) {
+        byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > MAX_STRING_BYTES) {
+            throw new IllegalArgumentException("String of %d UTF-8 bytes exceeds %d".formatted(bytes.length, MAX_STRING_BYTES));
+        }
+        return bytes;
+    }
+
+    private static int u16(int value, String what) {
+        if (value < 0 || value > 0xFFFF) {
+            throw new IllegalArgumentException(what + " out of u16 range: " + value);
+        }
+        return value;
+    }
+
+    private static byte roleCode(Hello.Role role) {
+        return switch (role) {
+            case AGENT -> 1;
+            case VIEWER -> 2;
+        };
+    }
+
+    private static byte formatCode(FrameUpdate.Format format) {
+        return switch (format) {
+            case JPEG -> 1;
+        };
+    }
+
+    private static byte buttonCode(MouseButton.Button button) {
+        return switch (button) {
+            case LEFT -> 1;
+            case MIDDLE -> 2;
+            case RIGHT -> 3;
+        };
+    }
+
+    // ---------------------------------------------------------------- decode
+
+    /**
+     * Decodes one frame from the current position of {@code in}. The buffer must be big-endian
+     * (the {@link ByteBuffer} default).
+     *
+     * @return the message, or empty when the frame is not complete yet; in that case
+     *         {@code in} is left untouched so the caller can append more bytes and retry
+     * @throws ProtocolException when the bytes can never form a valid frame
+     */
+    public Optional<Message> decode(ByteBuffer in) {
+        if (in.remaining() < LENGTH_FIELD) {
+            return Optional.empty();
+        }
+        int length = in.getInt(in.position()); // peek, don't consume
+        if (length < TYPE_AND_FLAGS || length > MAX_FRAME_LENGTH) {
+            throw new ProtocolException("Invalid frame length " + length);
+        }
+        if (in.remaining() < LENGTH_FIELD + length) {
+            return Optional.empty();
+        }
+
+        in.getInt();
+        MessageType type = MessageType.fromCode(in.get() & 0xFF);
+        int flags = in.get() & 0xFF;
+        if (flags != 0) {
+            // reserved: a future flag (e.g. compression) may change how the payload is read
+            throw new ProtocolException("Unsupported frame flags 0x%02x".formatted(flags));
+        }
+
+        ByteBuffer payload = in.slice(in.position(), length - TYPE_AND_FLAGS);
+        in.position(in.position() + payload.limit());
+        return Optional.of(decodePayload(type, payload));
+    }
+
+    private static Message decodePayload(MessageType type, ByteBuffer p) {
+        Message message;
+        try {
+            message = switch (type) {
+                case HELLO -> new Hello(p.getShort() & 0xFFFF, role(p.get()), string(p));
+                case SCREEN_INFO -> new ScreenInfo(p.getInt(), p.getInt(), p.getShort() & 0xFFFF);
+                case FRAME_UPDATE -> {
+                    long sequence = p.getLong();
+                    FrameUpdate.Format format = format(p.get());
+                    byte[] data = new byte[p.remaining()];
+                    p.get(data);
+                    yield new FrameUpdate(sequence, format, data);
+                }
+                case MOUSE_MOVE -> new MouseMove(p.getInt(), p.getInt());
+                case MOUSE_BUTTON -> new MouseButton(button(p.get()), pressed(p.get()));
+                case MOUSE_WHEEL -> new MouseWheel(p.getInt());
+                case HEARTBEAT -> new Heartbeat();
+                case BYE -> new Bye(string(p));
+            };
+        } catch (BufferUnderflowException e) {
+            throw new ProtocolException(type + " payload is too short");
+        } catch (IllegalArgumentException e) {
+            throw new ProtocolException(type + " has invalid content: " + e.getMessage());
+        }
+        // Hello may grow in later versions and must stay readable, or version negotiation breaks.
+        // Every other message is sent only after the version is agreed, so extra bytes are an error.
+        if (p.hasRemaining() && type != MessageType.HELLO) {
+            throw new ProtocolException(type + " payload has " + p.remaining() + " unexpected trailing bytes");
+        }
+        return message;
+    }
+
+    private static String string(ByteBuffer p) {
+        int length = p.getShort() & 0xFFFF;
+        if (p.remaining() < length) {
+            throw new BufferUnderflowException();
+        }
+        ByteBuffer bytes = p.slice(p.position(), length);
+        p.position(p.position() + length);
+        try {
+            return StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(bytes)
+                    .toString();
+        } catch (CharacterCodingException e) {
+            throw new ProtocolException("String is not valid UTF-8");
+        }
+    }
+
+    private static Hello.Role role(byte code) {
+        return switch (code) {
+            case 1 -> Hello.Role.AGENT;
+            case 2 -> Hello.Role.VIEWER;
+            default -> throw new ProtocolException("Unknown role " + code);
+        };
+    }
+
+    private static FrameUpdate.Format format(byte code) {
+        return switch (code) {
+            case 1 -> FrameUpdate.Format.JPEG;
+            default -> throw new ProtocolException("Unknown frame format " + code);
+        };
+    }
+
+    private static MouseButton.Button button(byte code) {
+        return switch (code) {
+            case 1 -> MouseButton.Button.LEFT;
+            case 2 -> MouseButton.Button.MIDDLE;
+            case 3 -> MouseButton.Button.RIGHT;
+            default -> throw new ProtocolException("Unknown mouse button " + code);
+        };
+    }
+
+    private static boolean pressed(byte code) {
+        return switch (code) {
+            case 0 -> false;
+            case 1 -> true;
+            default -> throw new ProtocolException("Invalid pressed flag " + code);
+        };
+    }
+}
