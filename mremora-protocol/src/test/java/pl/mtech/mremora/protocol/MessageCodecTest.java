@@ -121,6 +121,32 @@ class MessageCodecTest {
         assertThatThrownBy(() -> codec.decode(in)).isInstanceOf(ProtocolException.class);
     }
 
+    @Test
+    void customLimitRejectsLongerFrameBeforePayloadArrives() {
+        ByteBuffer in = buffer(0x00, 0x00, 0x04, 0x01); // length 1025, payload not sent yet
+
+        assertThatThrownBy(() -> codec.decode(in, 1024)).isInstanceOf(ProtocolException.class);
+    }
+
+    @Test
+    void customLimitAcceptsFrameAtLimit() {
+        int limit = 1024;
+        Bye bye = new Bye("x".repeat(limit - 4)); // type + flags + u16 string length + reason = limit
+        ByteBuffer in = codec.encode(bye);
+        assertThat(in.getInt(0)).isEqualTo(limit);
+
+        assertThat(codec.decode(in, limit)).contains(bye);
+    }
+
+    @Test
+    void rejectsLimitOutsideRange() {
+        ByteBuffer in = buffer(0x00, 0x00, 0x00, 0x02, 0x40, 0x00);
+
+        assertThatThrownBy(() -> codec.decode(in, 1)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> codec.decode(in, MessageCodec.MAX_FRAME_LENGTH + 1))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
     static int[] bytes(ByteBuffer buffer) {
         ByteBuffer copy = buffer.duplicate();
         int[] out = new int[copy.remaining()];

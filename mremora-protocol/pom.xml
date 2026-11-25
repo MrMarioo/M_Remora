@@ -12,5 +12,16 @@
 
     <artifactId>mremora-protocol</artifactId>
     <name>MRemora :: protocol</name>
-    <description>Messages, codecs and framing. No OS or network code.</description>
+    <description>Messages, codecs and framing. Netty adapters in protocol.netty only.</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec-base</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-handler</artifactId>
+        </dependency>
+    </dependencies>
 </project>

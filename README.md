@@ -105,6 +105,24 @@ Requires JDK 25 or newer. Maven is provided by the wrapper.
 mvnw.cmd verify      # Windows
 ```
 
+## Run (Stage 1)
+
+Start the agent on the controlled machine. It opens a small always-on-top window with a 6-digit pairing code and listens on port 7420.
+
+```bash
+./mvnw -q install -DskipTests                                   # Linux, once
+./mvnw -q -pl mremora-agent exec:java
+./mvnw -q -pl mremora-agent exec:java -Dexec.args="--port 7500" # custom port
+```
+
+```bat
+mvnw.cmd -q install -DskipTests
+mvnw.cmd -q -pl mremora-agent exec:java
+mvnw.cmd -q -pl mremora-agent exec:java -Dexec.args="--port 7500"
+```
+
+On Windows, allow the agent through Windows Firewall when prompted on the first start, otherwise other machines on the LAN cannot connect.
+
 ## Tech stack
 
 Java 25 · Netty · Foreign Function & Memory API · JavaFX · Redis · Micrometer · Prometheus · JUnit 6 · JMH · Testcontainers · Docker · Kubernetes · GitHub Actions
