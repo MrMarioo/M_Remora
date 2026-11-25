@@ -151,7 +151,7 @@ scripts/build-deb.sh 0.1.0               # 2a. Linux: .deb, same version as the 
 scripts/build-installer.sh 2026.11.25.1  # 2b. Windows (Git Bash, needs NSIS): setup.exe, version YYYY.MM.DD.N
 ```
 
-CI builds both packages on every pull request and publishes a release when changes are merged to `main`.
+A merge into `main` builds both packages and publishes them as a GitHub Release. To get test builds from another branch, run the Release workflow manually (Actions → Release → Run workflow); that only uploads artifacts.
 
 ## Run from source
 

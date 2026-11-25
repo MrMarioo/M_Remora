@@ -1,12 +1,11 @@
 name: Release
 
-# PR into staging/main: builds MRemora-setup-<version>.exe (Windows) and mremora_<app-version>_amd64.deb (Linux)
-# as CI artifacts. Push to main (merge of staging): the same, plus a GitHub Release with both files.
+# Merge into main (staging -> main PR): builds MRemora-setup-<version>.exe (Windows) and
+# mremora_<app-version>_amd64.deb (Linux) and publishes both as a GitHub Release.
+# Manual run (workflow_dispatch) on any branch: builds both as CI artifacts only, no release.
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [staging, main]
   workflow_dispatch:
 
 permissions:
@@ -14,7 +13,7 @@ permissions:
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 jobs:
   version:
