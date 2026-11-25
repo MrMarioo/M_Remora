@@ -14,3 +14,10 @@ Thumbs.db
 *.local.yml
 *.pem
 *.key
+
+# Local AI / tooling notes (not part of the project)
+docs/
+.superpowers/
+.playwright-mcp/
+playwright-report/
+test-results/
