@@ -5,6 +5,8 @@ import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -29,6 +31,9 @@ public final class MessageCodec {
     private static final int LENGTH_FIELD = 4;
     private static final int TYPE_AND_FLAGS = 2;
     private static final int MAX_STRING_BYTES = 0xFFFF;
+    private static final int TILE_UPDATE_HEADER = 8 + 2 + 2 + 1 + 2 + 2;
+    private static final int TILE_RECT_HEADER = 2 + 2 + 2 + 2 + 1 + 4;
+    private static final int TILE_FLAG_LAST_PART = 0x01;
 
     // ---------------------------------------------------------------- encode
 
@@ -52,6 +57,12 @@ public final class MessageCodec {
             case FrameUpdate update -> frame(MessageType.FRAME_UPDATE, 8 + 1 + update.dataLength())
                     .putLong(update.sequence()).put(formatCode(update.format())).put(update.data())
                     .flip();
+            case TileUpdate update -> encodeTileUpdate(update);
+            case FrameAck(long sequence) -> frame(MessageType.FRAME_ACK, 8).putLong(sequence).flip();
+            case CursorPosition(int x, int y) -> frame(MessageType.CURSOR_POSITION, 8).putInt(x).putInt(y).flip();
+            case StreamConfig(int maxWidth, int maxHeight) -> frame(MessageType.STREAM_CONFIG, 4)
+                    .putShort((short) maxWidth).putShort((short) maxHeight)
+                    .flip();
             case MouseMove(int x, int y) -> frame(MessageType.MOUSE_MOVE, 8).putInt(x).putInt(y).flip();
             case MouseButton(MouseButton.Button button, boolean pressed) -> frame(MessageType.MOUSE_BUTTON, 2)
                     .put(buttonCode(button)).put((byte) (pressed ? 1 : 0))
@@ -65,6 +76,30 @@ public final class MessageCodec {
                         .flip();
             }
         };
+    }
+
+    private static ByteBuffer encodeTileUpdate(TileUpdate update) {
+        long payloadLength = TILE_UPDATE_HEADER;
+        for (TileUpdate.Rect rect : update.rects()) {
+            payloadLength += TILE_RECT_HEADER + rect.dataLength();
+        }
+        if (payloadLength + TYPE_AND_FLAGS > MAX_FRAME_LENGTH) { // checked before allocating
+            throw new IllegalArgumentException("%s frame of %d bytes exceeds limit %d"
+                    .formatted(MessageType.TILE_UPDATE, payloadLength + TYPE_AND_FLAGS, MAX_FRAME_LENGTH));
+        }
+        ByteBuffer out = frame(MessageType.TILE_UPDATE, (int) payloadLength)
+                .putLong(update.sequence())
+                .putShort((short) update.streamWidth()).putShort((short) update.streamHeight())
+                .put((byte) (update.lastPart() ? TILE_FLAG_LAST_PART : 0))
+                .putShort((short) update.latencyMs())
+                .putShort((short) update.rects().size());
+        for (TileUpdate.Rect rect : update.rects()) {
+            out.putShort((short) rect.x()).putShort((short) rect.y())
+                    .putShort((short) rect.width()).putShort((short) rect.height())
+                    .put(encodingCode(rect.encoding()))
+                    .putInt(rect.dataLength()).put(rect.data());
+        }
+        return out.flip();
     }
 
     private static ByteBuffer frame(MessageType type, int payloadLength) {
@@ -103,6 +138,15 @@ public final class MessageCodec {
     private static byte formatCode(FrameUpdate.Format format) {
         return switch (format) {
             case JPEG -> 1;
+        };
+    }
+
+    private static byte encodingCode(TileUpdate.Encoding encoding) {
+        return switch (encoding) {
+            case SOLID -> 1;
+            case LOSSLESS -> 2;
+            case JPEG -> 3;
+            case COPY -> 4;
         };
     }
 
@@ -178,6 +222,10 @@ public final class MessageCodec {
                     p.get(data);
                     yield new FrameUpdate(sequence, format, data);
                 }
+                case TILE_UPDATE -> tileUpdate(p);
+                case FRAME_ACK -> new FrameAck(p.getLong());
+                case CURSOR_POSITION -> new CursorPosition(p.getInt(), p.getInt());
+                case STREAM_CONFIG -> new StreamConfig(p.getShort() & 0xFFFF, p.getShort() & 0xFFFF);
                 case MOUSE_MOVE -> new MouseMove(p.getInt(), p.getInt());
                 case MOUSE_BUTTON -> new MouseButton(button(p.get()), pressed(p.get()));
                 case MOUSE_WHEEL -> new MouseWheel(p.getInt());
@@ -195,6 +243,45 @@ public final class MessageCodec {
             throw new ProtocolException(type + " payload has " + p.remaining() + " unexpected trailing bytes");
         }
         return message;
+    }
+
+    private static TileUpdate tileUpdate(ByteBuffer p) {
+        long sequence = p.getLong();
+        int streamWidth = p.getShort() & 0xFFFF;
+        int streamHeight = p.getShort() & 0xFFFF;
+        int tileFlags = p.get() & 0xFF;
+        if ((tileFlags & ~TILE_FLAG_LAST_PART) != 0) {
+            throw new ProtocolException("Unsupported tile flags 0x%02x".formatted(tileFlags));
+        }
+        int latencyMs = p.getShort() & 0xFFFF;
+        int count = p.getShort() & 0xFFFF;
+        // do not trust count for sizing: each rect needs at least TILE_RECT_HEADER bytes
+        List<TileUpdate.Rect> rects = new ArrayList<>(Math.min(count, p.remaining() / TILE_RECT_HEADER));
+        for (int i = 0; i < count; i++) {
+            int x = p.getShort() & 0xFFFF;
+            int y = p.getShort() & 0xFFFF;
+            int width = p.getShort() & 0xFFFF;
+            int height = p.getShort() & 0xFFFF;
+            TileUpdate.Encoding encoding = encoding(p.get());
+            long length = p.getInt() & 0xFFFFFFFFL;
+            if (length > p.remaining()) { // before allocating: u32 length is attacker-controlled
+                throw new BufferUnderflowException();
+            }
+            byte[] data = new byte[(int) length];
+            p.get(data);
+            rects.add(new TileUpdate.Rect(x, y, width, height, encoding, data));
+        }
+        return new TileUpdate(sequence, streamWidth, streamHeight, (tileFlags & TILE_FLAG_LAST_PART) != 0, latencyMs, rects);
+    }
+
+    private static TileUpdate.Encoding encoding(byte code) {
+        return switch (code) {
+            case 1 -> TileUpdate.Encoding.SOLID;
+            case 2 -> TileUpdate.Encoding.LOSSLESS;
+            case 3 -> TileUpdate.Encoding.JPEG;
+            case 4 -> TileUpdate.Encoding.COPY;
+            default -> throw new ProtocolException("Unknown tile encoding " + code);
+        };
     }
 
     private static String string(ByteBuffer p) {

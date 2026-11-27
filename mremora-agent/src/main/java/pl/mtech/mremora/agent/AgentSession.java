@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.time.Duration;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -16,18 +17,26 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import pl.mtech.mremora.protocol.Bye;
+import pl.mtech.mremora.protocol.FrameAck;
 import pl.mtech.mremora.protocol.FrameUpdate;
 import pl.mtech.mremora.protocol.Message;
 import pl.mtech.mremora.protocol.MouseButton;
 import pl.mtech.mremora.protocol.MouseMove;
 import pl.mtech.mremora.protocol.MouseWheel;
+import pl.mtech.mremora.protocol.StreamConfig;
+import pl.mtech.mremora.protocol.TileUpdate;
 
 /**
- * The live remote session on one authenticated channel: streams frames through a one-frame slot, feeds mouse
- * input to a dedicated thread and ends exactly once, whatever the reason.
+ * The live remote session on one authenticated channel: streams frames, feeds mouse input to a dedicated thread
+ * and ends exactly once, whatever the reason.
  *
- * <p>Threads: a capture thread fills the slot; the channel's event loop sends at most one frame at a time and
- * owns all mutable state; a single input thread injects mouse events and, last, releases held buttons.
+ * <p>Protocol v1 streams whole JPEG frames through a one-frame slot. Protocol v2 streams changed tiles, with at
+ * most one frame waiting for the viewer's {@code FrameAck} ({@link AckGate}); {@code StreamConfig} resizes the
+ * stream from the next frame on.
+ *
+ * <p>Threads: a capture thread fills the slot (v1) or hands each frame's parts over (v2); the channel's event
+ * loop writes frames and owns all mutable state; a single input thread injects mouse events and, last, releases
+ * held buttons.
  */
 final class AgentSession extends ChannelInboundHandlerAdapter {
 
@@ -44,6 +53,10 @@ final class AgentSession extends ChannelInboundHandlerAdapter {
     private final Channel channel;
     private final Runnable onEnded;
     private final BlockingQueue<FrameUpdate> slot = new ArrayBlockingQueue<>(1);
+    /** v2 only, otherwise {@code null}. */
+    private final AckGate gate;
+    /** v2 only, otherwise {@code null}. */
+    private final TileFrameEncoder tileEncoder;
     private final Thread captureThread;
     private final InputDispatcher dispatcher;
     private final ExecutorService inputExecutor =
@@ -57,15 +70,29 @@ final class AgentSession extends ChannelInboundHandlerAdapter {
     private boolean ended;
 
     /**
-     * @param onEnded run on the event loop once the session has ended and held buttons were released
+     * @param protocolVersion the negotiated version, {@code 1} or {@code 2}
+     * @param onEnded         run on the event loop once the session has ended and held buttons were released
      */
-    AgentSession(Channel channel, ScreenCapturer capturer, InputInjector injector, int maxFps, Runnable onEnded) {
+    AgentSession(Channel channel, ScreenCapturer capturer, InputInjector injector, int maxFps, int protocolVersion,
+            Runnable onEnded) {
         this.channel = Objects.requireNonNull(channel, "channel");
         this.onEnded = Objects.requireNonNull(onEnded, "onEnded");
         this.dispatcher = new InputDispatcher(injector);
-        var producer = new FrameProducer(capturer, new JpegFrameEncoder(JpegFrameEncoder.DEFAULT_QUALITY));
-        var loop = new CaptureLoop(producer::next, slot, this::frameReady, this::captureFailed,
-                Duration.ofMillis(1000 / maxFps));
+        Duration interval = Duration.ofMillis(1000 / maxFps);
+        Runnable loop = switch (protocolVersion) {
+            case 1 -> {
+                this.gate = null;
+                this.tileEncoder = null;
+                var producer = new FrameProducer(capturer, new JpegFrameEncoder(JpegFrameEncoder.DEFAULT_QUALITY));
+                yield new CaptureLoop(producer::next, slot, this::frameReady, this::captureFailed, interval);
+            }
+            case 2 -> {
+                this.gate = new AckGate();
+                this.tileEncoder = new TileFrameEncoder(capturer);
+                yield new TileCaptureLoop(tileEncoder::next, gate, this::tilesReady, this::captureFailed, interval);
+            }
+            default -> throw new IllegalArgumentException("Unsupported protocol version " + protocolVersion);
+        };
         this.captureThread = Thread.ofPlatform().name("mremora-capture").daemon(true).unstarted(loop);
     }
 
@@ -111,6 +138,12 @@ final class AgentSession extends ChannelInboundHandlerAdapter {
             case MouseMove m -> inputExecutor.execute(() -> dispatch(m));
             case MouseButton b -> inputExecutor.execute(() -> dispatch(b));
             case MouseWheel w -> inputExecutor.execute(() -> dispatch(w));
+            case FrameAck ack when gate != null -> {
+                if (!gate.acked(ack.sequence())) {
+                    LOG.log(Level.DEBUG, "Ignoring unexpected ack of frame {0}", ack.sequence());
+                }
+            }
+            case StreamConfig config when tileEncoder != null -> tileEncoder.configure(config);
             case Bye bye -> {
                 LOG.log(Level.DEBUG, "Viewer said bye: {0}", bye.reason());
                 end(CLOSED_BY_VIEWER, false);
@@ -156,6 +189,22 @@ final class AgentSession extends ChannelInboundHandlerAdapter {
         });
     }
 
+    /** Event loop: writes the parts of one v2 frame; the gate keeps the next one back until the ack. */
+    private void writeTiles(List<TileUpdate> parts) {
+        if (ended) {
+            return;
+        }
+        for (int i = 0; i < parts.size(); i++) {
+            var future = i == parts.size() - 1 ? channel.writeAndFlush(parts.get(i)) : channel.write(parts.get(i));
+            future.addListener((ChannelFutureListener) f -> {
+                if (!f.isSuccess()) {
+                    LOG.log(Level.DEBUG, "Writing tiles failed: {0}", String.valueOf(f.cause()));
+                    end(CONNECTION_LOST, false);
+                }
+            });
+        }
+    }
+
     /** Event loop: the single end path. */
     private void end(String reason, boolean sayBye) {
         if (ended) {
@@ -164,6 +213,9 @@ final class AgentSession extends ChannelInboundHandlerAdapter {
         ended = true;
         LOG.log(Level.DEBUG, "Ending session: {0}", reason);
         captureThread.interrupt();
+        if (gate != null) {
+            gate.close(); // a capture thread parked on the gate must not wait for an ack that never comes
+        }
         slot.clear();
         inputClosed = true;
         inputExecutor.execute(this::releaseAndReport);
@@ -206,6 +258,11 @@ final class AgentSession extends ChannelInboundHandlerAdapter {
     /** Capture thread. */
     private void frameReady() {
         onLoop(this::pump);
+    }
+
+    /** Capture thread: the gate is taken for these parts; the event loop writes them. */
+    private void tilesReady(List<TileUpdate> parts) {
+        onLoop(() -> writeTiles(parts));
     }
 
     /** Capture thread. */

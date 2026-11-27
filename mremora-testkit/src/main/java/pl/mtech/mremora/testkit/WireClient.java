@@ -5,6 +5,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.net.InetAddress;
+import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.ByteBuffer;
@@ -42,6 +43,20 @@ public final class WireClient implements AutoCloseable {
     public static WireClient connect(int port) {
         try {
             Socket socket = new Socket(InetAddress.getLoopbackAddress(), port);
+            socket.setTcpNoDelay(true);
+            return new WireClient(socket);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /**
+     * Waits for one connection on {@code server} and speaks the wire format over it, for tests that play the
+     * server side (e.g. a fake agent).
+     */
+    public static WireClient accept(ServerSocket server) {
+        try {
+            Socket socket = server.accept();
             socket.setTcpNoDelay(true);
             return new WireClient(socket);
         } catch (IOException e) {
