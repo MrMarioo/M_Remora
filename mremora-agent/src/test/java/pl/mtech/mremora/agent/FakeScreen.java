@@ -11,13 +11,13 @@ import pl.mtech.mremora.protocol.MouseButton;
 import pl.mtech.mremora.protocol.ScreenInfo;
 
 /**
- * Screen and mouse for server tests: returns a fixed image, can start failing from the N-th capture,
+ * Screen and mouse for server tests: returns a fixed image (replaceable with {@link #setImage}), can start failing from the N-th capture,
  * counts captures and records mouse calls like {@code InputDispatcherTest} ({@code move 10,20}, {@code press LEFT}).
  * Moves can be held at a gate to block the input thread. Thread-safe.
  */
 final class FakeScreen implements ScreenCapturer, InputInjector {
 
-    private final BufferedImage image;
+    private volatile BufferedImage image;
     private final AtomicInteger captures = new AtomicInteger();
     private final List<String> calls = new ArrayList<>();
     private volatile int failFromCapture = Integer.MAX_VALUE;
@@ -31,6 +31,11 @@ final class FakeScreen implements ScreenCapturer, InputInjector {
     /** A black screen of the given size. */
     FakeScreen(int width, int height) {
         this(new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB));
+    }
+
+    /** Makes every later capture return {@code image}. */
+    void setImage(BufferedImage image) {
+        this.image = image;
     }
 
     /** Makes the {@code n}-th capture (1-based) and every later one throw. */

@@ -10,6 +10,9 @@ import io.netty.handler.codec.DecoderException;
 import io.netty.handler.timeout.IdleStateEvent;
 import java.nio.ByteBuffer;
 import java.time.Duration;
+import java.util.concurrent.TimeUnit;
+import io.netty.channel.ChannelHandler;
+import io.netty.handler.timeout.IdleStateHandler;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -101,6 +104,43 @@ class MessagePipelineTest {
     void readerIdleSendsByeTimeoutAndCloses() {
         channel.pipeline().fireUserEventTriggered(IdleStateEvent.READER_IDLE_STATE_EVENT);
         assertThat(readOutboundMessage()).isEqualTo(new Bye("timeout"));
+        assertThat(channel.isOpen()).isFalse();
+    }
+
+    private int indexOfType(Class<? extends ChannelHandler> type) {
+        int i = 0;
+        for (var entry : channel.pipeline()) {
+            if (type.isInstance(entry.getValue())) {
+                return i;
+            }
+            i++;
+        }
+        return -1;
+    }
+
+    @Test
+    void idleDetectionSitsBeforeTheDecoder() {
+        int idle = indexOfType(IdleStateHandler.class);
+        int decoder = indexOfType(MessageDecoder.class);
+        assertThat(idle).isGreaterThanOrEqualTo(0);
+        assertThat(idle).isLessThan(decoder);
+    }
+
+    @Test
+    void bytesOfAnUnfinishedFrameKeepTheLinkAlive() {
+        Message message = new Bye("x".repeat(32));
+        byte[] frame = bytes(message);
+        assertThat(frame).hasSize(40);
+        for (byte b : frame) {
+            channel.writeInbound(Unpooled.wrappedBuffer(new byte[] {b}));
+            channel.advanceTimeBy(1, TimeUnit.SECONDS);
+            channel.runScheduledPendingTasks();
+        }
+        assertThat(channel.isOpen()).isTrue();
+        assertThat((Object) channel.readInbound()).isEqualTo(message);
+
+        channel.advanceTimeBy(7, TimeUnit.SECONDS);
+        channel.runScheduledPendingTasks();
         assertThat(channel.isOpen()).isFalse();
     }
 

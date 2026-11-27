@@ -52,7 +52,7 @@ class AgentSessionTest {
     }
 
     private void startServer(Duration idleTimeout) {
-        AgentConfig config = new AgentConfig(0, Duration.ofSeconds(30), LONG, idleTimeout, 30);
+        AgentConfig config = new AgentConfig(0, Duration.ofSeconds(30), LONG, idleTimeout, 30, Hello.PROTOCOL_VERSION);
         server = new AgentServer(config, screen, screen, new PairingCodes(clock, new Random(1)), ui);
         port = server.start();
     }

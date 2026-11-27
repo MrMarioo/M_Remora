@@ -1,6 +1,7 @@
 package pl.mtech.mremora.viewer;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
 import java.net.ConnectException;
@@ -22,6 +23,22 @@ class ViewerAppTest {
         assertThat(ViewerApp.toProtocol(MouseButton.BACK)).isEmpty();
         assertThat(ViewerApp.toProtocol(MouseButton.FORWARD)).isEmpty();
         assertThat(ViewerApp.toProtocol(MouseButton.NONE)).isEmpty();
+    }
+
+    @Test
+    void tilesGoToTheViewOfTheCurrentAttempt() {
+        assertThat(ViewerApp.acceptsTiles(true, true)).isTrue();
+    }
+
+    @Test
+    void tilesOfAStaleAttemptAreIgnored() {
+        assertThat(ViewerApp.acceptsTiles(false, false)).isFalse();
+        assertThat(ViewerApp.acceptsTiles(false, true)).isFalse();
+    }
+
+    @Test
+    void tilesBeforeTheViewExistsThrowSoTheSessionEndsUnacked() {
+        assertThatThrownBy(() -> ViewerApp.acceptsTiles(true, false)).isInstanceOf(IllegalStateException.class);
     }
 
     @Test

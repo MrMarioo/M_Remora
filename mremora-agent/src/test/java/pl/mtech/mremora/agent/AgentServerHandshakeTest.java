@@ -41,9 +41,11 @@ class AgentServerHandshakeTest {
     }
 
     private void startServer(Duration handshakeTimeout) {
+        // Pinned to v1: these tests pin the v1 handshake, independent of Hello.PROTOCOL_VERSION.
         // Long heartbeat and idle: no heartbeat between expected messages, and only the handshake timer
         // may close a silent connection.
-        AgentConfig config = new AgentConfig(0, handshakeTimeout, Duration.ofSeconds(60), Duration.ofSeconds(60), 30);
+        AgentConfig config = new AgentConfig(0, handshakeTimeout, Duration.ofSeconds(60), Duration.ofSeconds(60), 30,
+                1);
         server = new AgentServer(config, screen, screen, new PairingCodes(clock, new Random(1)), ui);
         port = server.start();
     }

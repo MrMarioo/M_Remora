@@ -79,4 +79,11 @@ class ViewportTest {
         assertThat(v.toImage(980, 0)).isEmpty();
         assertThat(v.toImage(500, 540)).isEmpty();
     }
+
+    @Test
+    void mappingUsesScreenPixelsNotStreamPixels() {
+        Viewport v = Viewport.fit(2560, 1440, 1600, 900);
+        assertThat(v.toImage(1599.9, 899.9)).contains(new ImagePoint(2559, 1439));
+        assertThat(v.toImage(800, 450)).contains(new ImagePoint(1280, 720));
+    }
 }

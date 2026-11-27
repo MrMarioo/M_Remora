@@ -101,6 +101,21 @@ public final class ViewerApp extends Application {
         };
     }
 
+    /**
+     * Whether a decoded tile frame goes to the session view. Tiles of a stale attempt are ignored. Tiles of the
+     * current attempt with no view yet throw: the session would ack a delta that was never applied and the image
+     * would silently diverge, so {@link ViewerSession} ends it with {@code Bye("protocol error")} instead.
+     */
+    static boolean acceptsTiles(boolean currentAttempt, boolean hasView) {
+        if (!currentAttempt) {
+            return false;
+        }
+        if (!hasView) {
+            throw new IllegalStateException("Tile frame for the current session before its view exists");
+        }
+        return true;
+    }
+
     /** A status line for a failed connection attempt; completion/execution wrappers are unwrapped. */
     static String describeFailure(Throwable t) {
         Throwable cause = t;
@@ -241,6 +256,13 @@ public final class ViewerApp extends Application {
         public void onFrame(DecodedFrame frame) {
             if (this == attempt && sessionView != null) {
                 sessionView.onFrame(frame);
+            }
+        }
+
+        @Override
+        public void onTiles(DecodedTiles tiles) {
+            if (acceptsTiles(this == attempt, sessionView != null)) {
+                sessionView.onTiles(tiles);
             }
         }
 

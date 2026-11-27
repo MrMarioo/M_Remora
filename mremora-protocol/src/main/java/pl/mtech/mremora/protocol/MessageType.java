@@ -7,9 +7,14 @@ enum MessageType {
     HELLO(0x01),
     SCREEN_INFO(0x02),
     FRAME_UPDATE(0x10),
+    TILE_UPDATE(0x11),
+    FRAME_ACK(0x12),
+    // 0x13 is reserved for a future message (planned: cursor shape, Stage 5)
+    CURSOR_POSITION(0x14),
     MOUSE_MOVE(0x20),
     MOUSE_BUTTON(0x21),
     MOUSE_WHEEL(0x22),
+    STREAM_CONFIG(0x23),
     HEARTBEAT(0x30),
     BYE(0x31);
 

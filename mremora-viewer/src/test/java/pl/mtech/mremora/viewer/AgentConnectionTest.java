@@ -22,11 +22,17 @@ import org.junit.jupiter.api.Test;
 import pl.mtech.mremora.agent.AgentConfig;
 import pl.mtech.mremora.agent.AgentServer;
 import pl.mtech.mremora.agent.PairingCodes;
+import pl.mtech.mremora.protocol.Bye;
+import pl.mtech.mremora.protocol.FrameAck;
 import pl.mtech.mremora.protocol.FrameUpdate;
 import pl.mtech.mremora.protocol.Heartbeat;
+import pl.mtech.mremora.protocol.Hello;
+import pl.mtech.mremora.protocol.Message;
 import pl.mtech.mremora.protocol.MouseButton;
 import pl.mtech.mremora.protocol.MouseMove;
 import pl.mtech.mremora.protocol.ScreenInfo;
+import pl.mtech.mremora.protocol.StreamConfig;
+import pl.mtech.mremora.protocol.TileUpdate;
 import pl.mtech.mremora.testkit.MutableClock;
 
 /** {@link AgentConnection} against a real {@link AgentServer} over loopback. */
@@ -50,6 +56,16 @@ class AgentConnectionTest {
         port = server.start();
     }
 
+    /** Replaces the default agent with one offering at most {@code maxProtocolVersion}. */
+    private void restartServer(int maxProtocolVersion) {
+        server.close();
+        AgentConfig defaults = AgentConfig.defaults(0);
+        AgentConfig config = new AgentConfig(0, defaults.handshakeTimeout(), defaults.heartbeatInterval(),
+                defaults.idleTimeout(), defaults.maxFps(), maxProtocolVersion);
+        server = new AgentServer(config, desktop, desktop, new PairingCodes(clock, new Random(1)), ui);
+        port = server.start();
+    }
+
     @AfterEach
     void tearDown() {
         connections.forEach(AgentConnection::close);
@@ -57,8 +73,22 @@ class AgentConnectionTest {
     }
 
     private AgentConnection connect(String code) throws Exception {
-        AgentConnection connection = AgentConnection.connect("127.0.0.1", port, code, listener)
+        return connect(code, 1);
+    }
+
+    private AgentConnection connect(String code, int protocolVersion) throws Exception {
+        AgentConnection connection = AgentConnection.connect("127.0.0.1", port, code, protocolVersion, listener)
                 .get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
+        connections.add(connection);
+        return connection;
+    }
+
+    /** Connects to {@code agent} and lets it answer with {@code version}. */
+    private AgentConnection connectToFake(FakeAgent agent, int proposed, int version) throws Exception {
+        CompletableFuture<AgentConnection> future =
+                AgentConnection.connect("127.0.0.1", agent.port(), "123456", proposed, listener);
+        agent.handshake(version, new ScreenInfo(32, 16, 100), WAIT);
+        AgentConnection connection = future.get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
         connections.add(connection);
         return connection;
     }
@@ -76,8 +106,14 @@ class AgentConnectionTest {
     }
 
     @Test
+    void defaultVersionIsTheWireVersionCappedAtWhatTheViewerImplements() {
+        assertThat(AgentConnection.DEFAULT_PROTOCOL_VERSION)
+                .isEqualTo(Math.min(Hello.PROTOCOL_VERSION, AgentConnection.HIGHEST_PROTOCOL_VERSION));
+    }
+
+    @Test
     void nullCodeIsRejectedUpFront() {
-        assertThatThrownBy(() -> AgentConnection.connect("127.0.0.1", port, null, listener))
+        assertThatThrownBy(() -> AgentConnection.connect("127.0.0.1", port, null, 1, listener))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("pairingCode");
     }
@@ -102,7 +138,7 @@ class AgentConnectionTest {
 
     @Test
     void wrongCodeFailsWithReason() {
-        CompletableFuture<AgentConnection> future = AgentConnection.connect("127.0.0.1", port, wrongCode(), listener);
+        CompletableFuture<AgentConnection> future = AgentConnection.connect("127.0.0.1", port, wrongCode(), 1, listener);
 
         assertThatThrownBy(() -> future.get(WAIT.toMillis(), TimeUnit.MILLISECONDS))
                 .isInstanceOf(ExecutionException.class)
@@ -116,7 +152,7 @@ class AgentConnectionTest {
         // Accepts the TCP connection (backlog) but never answers.
         try (ServerSocket silent = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
             CompletableFuture<AgentConnection> future =
-                    AgentConnection.connect("127.0.0.1", silent.getLocalPort(), "123456", listener);
+                    AgentConnection.connect("127.0.0.1", silent.getLocalPort(), "123456", 1, listener);
 
             assertThatThrownBy(() -> future.get(15, TimeUnit.SECONDS))
                     .isInstanceOf(ExecutionException.class)
@@ -158,6 +194,98 @@ class AgentConnectionTest {
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
+    @Test
+    void negotiatesV2WithANewAgent() throws Exception {
+        restartServer(2);
+
+        AgentConnection connection = connect(ui.lastCode(), 2);
+
+        assertThat(connection.protocolVersion()).isEqualTo(2);
+        // A static screen yields one frame and then nothing until it changes or the frame is acked.
+        assertThat(poll(() -> listener.tiles() >= 1, WAIT)).isTrue();
+        assertThat(listener.frames()).isZero();
+    }
+
+    @Test
+    void defaultViewerAndAgentTalkV2() throws Exception {
+        AgentConnection connection = AgentConnection.connect("127.0.0.1", port, ui.lastCode(), listener)
+                .get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
+        connections.add(connection);
+
+        assertThat(connection.protocolVersion()).isEqualTo(2);
+        assertThat(poll(() -> listener.tiles() >= 1, WAIT)).isTrue();
+        assertThat(listener.frames()).isZero();
+    }
+
+    @Test
+    void negotiatesV1WithAnOldAgent() throws Exception {
+        restartServer(1);
+
+        AgentConnection connection = connect(ui.lastCode(), 2);
+
+        assertThat(connection.protocolVersion()).isEqualTo(1);
+        assertThat(poll(() -> listener.frames() >= 1, WAIT)).isTrue();
+        assertThat(listener.tiles()).isZero();
+    }
+
+    @Test
+    void v1SessionSendsNoAckNorStreamConfig() throws Exception {
+        try (FakeAgent agent = new FakeAgent()) {
+            AgentConnection connection = connectToFake(agent, 2, 1);
+
+            connection.sendFrameAck(0);
+            connection.sendStreamConfig(new StreamConfig(16, 8));
+            connection.sendInput(new MouseMove(1, 2)); // sentinel: everything sent before it has arrived
+
+            List<Message> received = new ArrayList<>();
+            Message m;
+            do {
+                m = agent.wire().receive(WAIT);
+                received.add(m);
+            } while (!(m instanceof MouseMove));
+            assertThat(received.subList(0, received.size() - 1)).allMatch(Heartbeat.class::isInstance);
+            assertThat(m).isEqualTo(new MouseMove(1, 2));
+        }
+    }
+
+    @Test
+    void v2SessionSendsAckAndStreamConfig() throws Exception {
+        try (FakeAgent agent = new FakeAgent()) {
+            AgentConnection connection = connectToFake(agent, 2, 2);
+
+            connection.sendFrameAck(7);
+            connection.sendStreamConfig(new StreamConfig(16, 8));
+
+            assertThat(receiveSkippingHeartbeats(agent)).isEqualTo(new FrameAck(7));
+            assertThat(receiveSkippingHeartbeats(agent)).isEqualTo(new StreamConfig(16, 8));
+        }
+    }
+
+    @Test
+    void abortSaysByeWithTheReason() throws Exception {
+        try (FakeAgent agent = new FakeAgent()) {
+            AgentConnection connection = connectToFake(agent, 2, 2);
+
+            connection.abort("protocol error");
+
+            assertThat(agent.wire().receiveUntilClosed(WAIT))
+                    .filteredOn(msg -> !(msg instanceof Heartbeat))
+                    .containsExactly(new Bye("protocol error"));
+            assertThat(poll(() -> !listener.closedReasons().isEmpty(), WAIT)).isTrue();
+            connection.close(); // waits for the connection's thread: no late second onClosed
+            assertThat(listener.closedReasons()).containsExactly("protocol error");
+        }
+    }
+
+    private static Message receiveSkippingHeartbeats(FakeAgent agent) {
+        while (true) {
+            Message m = agent.wire().receive(WAIT);
+            if (!(m instanceof Heartbeat)) {
+                return m;
+            }
+        }
+    }
+
     private static boolean poll(BooleanSupplier condition, Duration timeout) throws InterruptedException {
         long deadline = System.nanoTime() + timeout.toNanos();
         while (!condition.getAsBoolean()) {
@@ -173,11 +301,17 @@ class AgentConnectionTest {
     private static final class RecordingListener implements AgentConnection.Listener {
 
         private final AtomicInteger frames = new AtomicInteger();
+        private final AtomicInteger tiles = new AtomicInteger();
         private final List<String> closedReasons = new ArrayList<>();
 
         @Override
         public void onFrame(FrameUpdate frame) {
             frames.incrementAndGet();
+        }
+
+        @Override
+        public void onTiles(TileUpdate part) {
+            tiles.incrementAndGet();
         }
 
         @Override
@@ -187,6 +321,10 @@ class AgentConnectionTest {
 
         int frames() {
             return frames.get();
+        }
+
+        int tiles() {
+            return tiles.get();
         }
 
         synchronized List<String> closedReasons() {

@@ -17,6 +17,7 @@ Thumbs.db
 
 # Local AI / tooling notes (not part of the project)
 docs/
+CLAUDE.md
 .superpowers/
 .playwright-mcp/
 playwright-report/

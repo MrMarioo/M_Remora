@@ -9,16 +9,21 @@ import pl.mtech.mremora.protocol.MouseButton;
 import pl.mtech.mremora.protocol.ScreenInfo;
 
 /**
- * Screen and mouse of the agent in viewer tests: a fixed black image, mouse calls recorded as strings
- * ({@code move 7,8}, {@code press LEFT}). Thread-safe.
+ * Screen and mouse of the agent in viewer tests: a black image (replaceable with {@link #setImage}), mouse calls
+ * recorded as strings ({@code move 7,8}, {@code press LEFT}). Thread-safe.
  */
 final class FakeDesktop implements ScreenCapturer, InputInjector {
 
-    private final BufferedImage image;
+    private volatile BufferedImage image;
     private final List<String> calls = new ArrayList<>();
 
     FakeDesktop(int width, int height) {
         this.image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+    }
+
+    /** What the next captures return; keep the size, the agent's {@link ScreenInfo} does not change. */
+    void setImage(BufferedImage image) {
+        this.image = image;
     }
 
     synchronized List<String> calls() {

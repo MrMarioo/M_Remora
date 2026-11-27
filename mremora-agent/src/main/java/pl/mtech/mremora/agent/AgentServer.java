@@ -203,9 +203,10 @@ public final class AgentServer implements AutoCloseable {
     /** Event loop: a verified viewer becomes the session; frames start after the handshake reply. */
     private void startSession(ChannelHandlerContext ctx, Hello hello, ScreenInfo screen) {
         Channel ch = ctx.channel();
-        ctx.write(new Hello(Math.min(Hello.PROTOCOL_VERSION, hello.protocolVersion()), Hello.Role.AGENT, ""));
+        int version = Math.min(config.maxProtocolVersion(), hello.protocolVersion());
+        ctx.write(new Hello(version, Hello.Role.AGENT, ""));
         ctx.writeAndFlush(screen);
-        AgentSession s = new AgentSession(ch, capturer, injector, config.maxFps(), () -> sessionEnded(ch));
+        AgentSession s = new AgentSession(ch, capturer, injector, config.maxFps(), version, () -> sessionEnded(ch));
         session = s;
         shownCode = null;
         ctx.pipeline().replace(ctx.handler(), "session", s);
