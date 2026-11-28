@@ -73,7 +73,30 @@ class MessageWireFormatTest {
                 Arguments.of(new CursorPosition(100, -1), new int[] {
                         0x00, 0x00, 0x00, 0x0A, 0x14, 0x00, 0x00, 0x00, 0x00, 0x64, 0xFF, 0xFF, 0xFF, 0xFF}),
                 Arguments.of(new StreamConfig(1600, 900), new int[] {
-                        0x00, 0x00, 0x00, 0x06, 0x23, 0x00, 0x06, 0x40, 0x03, 0x84}));
+                        0x00, 0x00, 0x00, 0x06, 0x23, 0x00, 0x06, 0x40, 0x03, 0x84}),
+                Arguments.of(new TransportState(TransportState.Mode.TCP, 0), new int[] {
+                        0x00, 0x00, 0x00, 0x05, 0x33, 0x00, 0x01, 0x00, 0x00}),
+                Arguments.of(new TransportState(TransportState.Mode.UDP, 0x0102), new int[] {
+                        0x00, 0x00, 0x00, 0x05, 0x33, 0x00, 0x02, 0x01, 0x02}),
+                Arguments.of(new UdpSetup(7420, 0x0A0B0C0D, sequentialKey()), udpSetupFrame()));
+    }
+
+    private static byte[] sequentialKey() {
+        byte[] key = new byte[32];
+        for (int i = 0; i < key.length; i++) {
+            key[i] = (byte) i;
+        }
+        return key;
+    }
+
+    private static int[] udpSetupFrame() {
+        int[] frame = new int[4 + 40];
+        int[] head = {0x00, 0x00, 0x00, 0x28, 0x32, 0x00, 0x1C, 0xFC, 0x0A, 0x0B, 0x0C, 0x0D};
+        System.arraycopy(head, 0, frame, 0, head.length);
+        for (int i = 0; i < 32; i++) {
+            frame[head.length + i] = i;
+        }
+        return frame;
     }
 
     @ParameterizedTest

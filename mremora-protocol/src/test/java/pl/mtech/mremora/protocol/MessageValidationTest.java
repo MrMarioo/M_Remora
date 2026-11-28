@@ -137,4 +137,80 @@ class MessageValidationTest {
         assertThatThrownBy(() -> new TileUpdate.Rect(0, 0, 1, 1, null, new byte[0])).isInstanceOf(NullPointerException.class);
         assertThatThrownBy(() -> new TileUpdate.Rect(0, 0, 1, 1, TileUpdate.Encoding.COPY, null)).isInstanceOf(NullPointerException.class);
     }
+
+    private static byte[] key(int length, int fill) {
+        byte[] key = new byte[length];
+        java.util.Arrays.fill(key, (byte) fill);
+        return key;
+    }
+
+    @Test
+    void udpSetupRejectsBadPortAndKeyLength() {
+        assertThatThrownBy(() -> new UdpSetup(0, 1, key(32, 1))).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new UdpSetup(65_536, 1, key(32, 1))).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new UdpSetup(7420, 1, key(31, 1))).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new UdpSetup(7420, 1, key(33, 1))).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new UdpSetup(7420, 1, null)).isInstanceOf(NullPointerException.class);
+        new UdpSetup(65_535, 1, key(32, 1));
+    }
+
+    @Test
+    void transportStateRejectsBadEpochAndNullMode() {
+        assertThatThrownBy(() -> new TransportState(TransportState.Mode.TCP, -1))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new TransportState(TransportState.Mode.TCP, 65_536))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new TransportState(null, 0)).isInstanceOf(NullPointerException.class);
+        new TransportState(TransportState.Mode.UDP, 65_535);
+    }
+
+    @Test
+    void unknownTransportModeFromTheWireIsAProtocolError() {
+        var in = buffer(0x00, 0x00, 0x00, 0x05, 0x33, 0x00, 0x03, 0x00, 0x00);
+
+        assertThatThrownBy(() -> new MessageCodec().decode(in))
+                .isInstanceOf(ProtocolException.class).hasMessageContaining("mode");
+    }
+
+    @Test
+    void transportStateWithTrailingBytesIsAProtocolError() {
+        var in = buffer(0x00, 0x00, 0x00, 0x06, 0x33, 0x00, 0x01, 0x00, 0x00, 0x00);
+
+        assertThatThrownBy(() -> new MessageCodec().decode(in)).isInstanceOf(ProtocolException.class);
+    }
+
+    @Test
+    void udpSetupWithTrailingOrMissingBytesIsAProtocolError() {
+        byte[] good = new MessageCodec().encode(new UdpSetup(7420, 1, key(32, 1))).array();
+        byte[] longer = java.util.Arrays.copyOf(good, good.length + 1);
+        longer[3] = (byte) (longer[3] + 1);
+        byte[] shorter = java.util.Arrays.copyOf(good, good.length - 1);
+        shorter[3] = (byte) (shorter[3] - 1);
+
+        assertThatThrownBy(() -> new MessageCodec().decode(java.nio.ByteBuffer.wrap(longer)))
+                .isInstanceOf(ProtocolException.class);
+        assertThatThrownBy(() -> new MessageCodec().decode(java.nio.ByteBuffer.wrap(shorter)))
+                .isInstanceOf(ProtocolException.class);
+    }
+
+    @Test
+    void udpSetupToStringHidesKey() {
+        UdpSetup setup = new UdpSetup(7420, 99, key(32, 0x7F));
+
+        assertThat(setup.toString()).contains("udpPort=7420").doesNotContain("7F").doesNotContain("7f")
+                .doesNotContain("127").doesNotContain("[B@");
+    }
+
+    @Test
+    void udpSetupKeyIsCopied() {
+        byte[] input = key(32, 5);
+        UdpSetup setup = new UdpSetup(7420, 1, input);
+
+        input[0] = 9;
+        setup.key()[1] = 9;
+
+        assertThat(setup.key()).containsExactly(key(32, 5));
+        assertThat(setup).isEqualTo(new UdpSetup(7420, 1, key(32, 5))).hasSameHashCodeAs(new UdpSetup(7420, 1, key(32, 5)));
+        assertThat(setup).isNotEqualTo(new UdpSetup(7420, 1, key(32, 6)));
+    }
 }

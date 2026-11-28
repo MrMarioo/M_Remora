@@ -5,5 +5,5 @@ package pl.mtech.mremora.protocol;
  */
 public sealed interface Message
         permits Hello, ScreenInfo, FrameUpdate, MouseMove, MouseButton, MouseWheel, Heartbeat, Bye,
-                TileUpdate, FrameAck, CursorPosition, StreamConfig {
+                TileUpdate, FrameAck, CursorPosition, StreamConfig, UdpSetup, TransportState {
 }

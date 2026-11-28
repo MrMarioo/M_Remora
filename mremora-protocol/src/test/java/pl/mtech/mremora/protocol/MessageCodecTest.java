@@ -23,6 +23,16 @@ class MessageCodecTest {
     }
 
     @Test
+    void udpSetupAndTransportStateSurviveARoundTrip() {
+        byte[] key = new byte[32];
+        java.util.Arrays.fill(key, (byte) 0xA5);
+        for (Message message : new Message[] {
+                new UdpSetup(65_535, -1, key), new TransportState(TransportState.Mode.UDP, 65_535)}) {
+            assertThat(codec.decode(codec.encode(message))).contains(message);
+        }
+    }
+
+    @Test
     void decodesMouseMoveFromHandWrittenFrame() {
         ByteBuffer in = buffer(
                 0x00, 0x00, 0x00, 0x0A, 0x20, 0x00,

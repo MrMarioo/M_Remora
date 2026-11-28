@@ -32,9 +32,12 @@ import pl.mtech.mremora.protocol.Heartbeat;
 import pl.mtech.mremora.protocol.Message;
 import pl.mtech.mremora.protocol.MouseButton;
 import pl.mtech.mremora.protocol.MouseMove;
+import pl.mtech.mremora.protocol.RectPixels;
 import pl.mtech.mremora.protocol.ScreenInfo;
 import pl.mtech.mremora.protocol.StreamConfig;
 import pl.mtech.mremora.protocol.TileUpdate;
+import pl.mtech.mremora.protocol.TransportState;
+import pl.mtech.mremora.protocol.udp.UdpImageSender;
 import pl.mtech.mremora.testkit.MutableClock;
 
 /** {@link ViewerSession} against a real {@link AgentServer} over loopback, with an inline "UI" executor. */
@@ -94,9 +97,14 @@ class ViewerSessionTest {
 
     /** Opens a v2 session to {@code agent}, which shows a {@code width x height} screen. */
     private ViewerSession openToFake(FakeAgent agent, int width, int height) throws Exception {
+        return openToFake(agent, 2, width, height);
+    }
+
+    /** Opens a session of {@code version} to {@code agent}, which shows a {@code width x height} screen. */
+    private ViewerSession openToFake(FakeAgent agent, int version, int width, int height) throws Exception {
         CompletableFuture<ViewerSession> future =
-                ViewerSession.open("127.0.0.1", agent.port(), "123456", 2, UI, listener);
-        agent.handshake(2, new ScreenInfo(width, height, 100), WAIT);
+                ViewerSession.open("127.0.0.1", agent.port(), "123456", version, UI, listener);
+        agent.handshake(version, new ScreenInfo(width, height, 100), WAIT);
         ViewerSession session = future.get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
         sessions.add(session);
         return session;
@@ -352,6 +360,116 @@ class ViewerSessionTest {
         }
     }
 
+    @Test
+    void udpTransportUsesUdpDecoder() throws Exception {
+        try (FakeAgent agent = new FakeAgent(); SenderUdpAgent udp = new SenderUdpAgent()) {
+            ViewerSession session = openToFake(agent, 3, 32, 16);
+            agent.wire().send(udp.setup());
+            agent.wire().send(new TransportState(TransportState.Mode.UDP, 0));
+            UdpImageSender sender = udp.sender();
+            sender.newEpoch(0, 32, 16);
+            sender.submit(0, 1, SenderUdpAgent.solidStream(32, 16, RectPixels.encodeSolid(0xFFFFFF)),
+                    System.nanoTime());
+
+            // Applied by the viewer and acknowledged over UDP: the sender holds nothing back any more.
+            assertThat(udp.pumpUntil(() -> sender.outstandingBytes() == 0, WAIT)).isTrue();
+            assertThat(listener.tiles()).singleElement().satisfies(t -> {
+                assertThat(List.of(t.sequence(), (long) t.streamWidth(), (long) t.streamHeight()))
+                        .containsExactly(1L, 32L, 16L);
+                assertThat(t.patches()).singleElement()
+                        .satisfies(p -> assertThat(p.argb()).hasSize(32 * 16).containsOnly(0xFFFFFFFF));
+            });
+            assertThat(sender.admitsCapture()).isTrue();
+            // The UDP picture is never acknowledged over TCP: a sentinel shows everything sent before it.
+            session.input().setViewport(Viewport.fit(32, 16, 32, 16));
+            session.input().moved(1, 1);
+            assertThat(receiveUntil(agent, MouseMove.class)).noneMatch(FrameAck.class::isInstance);
+            assertThat(listener.closedReasons()).isEmpty();
+        }
+    }
+
+    @Test
+    void earlyRectsBeforeTransportStateApplied() throws Exception {
+        try (FakeAgent agent = new FakeAgent(); SenderUdpAgent udp = new SenderUdpAgent()) {
+            openToFake(agent, 3, 32, 16);
+            agent.wire().send(udp.setup()); // no TransportState yet: UDP rects may overtake it
+            UdpImageSender sender = udp.sender();
+            sender.newEpoch(0, 32, 16);
+            sender.submit(0, 4, SenderUdpAgent.solidStream(32, 16, RectPixels.encodeSolid(0x123456)),
+                    System.nanoTime());
+
+            assertThat(udp.pumpUntil(() -> sender.outstandingBytes() == 0, WAIT)).isTrue();
+            assertThat(listener.tiles()).singleElement().satisfies(t -> assertThat(t.patches()).singleElement()
+                    .satisfies(p -> assertThat(p.argb()).containsOnly(0xFF123456)));
+            assertThat(listener.closedReasons()).isEmpty();
+        }
+    }
+
+    @Test
+    void udpRectsBeforeTheViewAreDroppedThenApplied() throws Exception {
+        try (FakeAgent agent = new FakeAgent(); SenderUdpAgent udp = new SenderUdpAgent()) {
+            openToFake(agent, 3, 32, 16);
+            listener.udpViewReady(false);
+            agent.wire().send(udp.setup());
+            UdpImageSender sender = udp.sender();
+            sender.newEpoch(0, 32, 16);
+            sender.submit(0, 1, SenderUdpAgent.solidStream(32, 16, RectPixels.encodeSolid(0xFF0000)),
+                    System.nanoTime());
+
+            // Refused by the "UI": reported dropped, so the agent has to send the tiles again.
+            assertThat(udp.pumpUntil(() -> sender.outstandingBytes() == 0, WAIT)).isTrue();
+            assertThat(listener.tiles()).isEmpty();
+            assertThat(sender.takeForced().tiles().cardinality()).isEqualTo(1);
+
+            listener.udpViewReady(true);
+            sender.submit(0, 2, SenderUdpAgent.solidStream(32, 16, RectPixels.encodeSolid(0x00FF00)),
+                    System.nanoTime());
+            assertThat(udp.pumpUntil(() -> sender.outstandingBytes() == 0, WAIT)).isTrue();
+            assertThat(listener.tiles()).singleElement().satisfies(t -> assertThat(t.patches()).singleElement()
+                    .satisfies(p -> assertThat(p.argb()).containsOnly(0xFF00FF00)));
+            assertThat(sender.takeForced().tiles().isEmpty()).isTrue();
+            assertThat(listener.closedReasons()).isEmpty();
+        }
+    }
+
+    @Test
+    void udpStreamLargerThanTheAgentScreenEndsTheSession() throws Exception {
+        try (FakeAgent agent = new FakeAgent(); SenderUdpAgent udp = new SenderUdpAgent()) {
+            openToFake(agent, 3, 16, 16);
+            agent.wire().send(udp.setup());
+            UdpImageSender sender = udp.sender();
+            sender.newEpoch(0, 32, 16); // 32x16 on a 16x16 screen: the agent never upscales
+            sender.submit(0, 1, SenderUdpAgent.solidStream(32, 16, RectPixels.encodeSolid(0)), System.nanoTime());
+
+            assertThat(udp.pumpUntil(() -> !listener.closedReasons().isEmpty(), WAIT)).isTrue();
+            assertThat(listener.closedReasons()).containsExactly("protocol error");
+            assertThat(agent.wire().receiveUntilClosed(WAIT))
+                    .filteredOn(msg -> !(msg instanceof Heartbeat))
+                    .containsExactly(new Bye("protocol error"));
+            assertThat(listener.tiles()).isEmpty();
+        }
+    }
+
+    @Test
+    void failingUdpListenerEndsTheSession() throws Exception {
+        try (FakeAgent agent = new FakeAgent(); SenderUdpAgent udp = new SenderUdpAgent()) {
+            openToFake(agent, 3, 32, 16);
+            listener.onTiles(t -> {
+                throw new IllegalStateException("view broken");
+            });
+            agent.wire().send(udp.setup());
+            UdpImageSender sender = udp.sender();
+            sender.newEpoch(0, 32, 16);
+            sender.submit(0, 1, SenderUdpAgent.solidStream(32, 16, RectPixels.encodeSolid(0)), System.nanoTime());
+
+            assertThat(udp.pumpUntil(() -> !listener.closedReasons().isEmpty(), WAIT)).isTrue();
+            assertThat(listener.closedReasons()).containsExactly("protocol error");
+            assertThat(agent.wire().receiveUntilClosed(WAIT))
+                    .filteredOn(msg -> !(msg instanceof Heartbeat))
+                    .containsExactly(new Bye("protocol error"));
+        }
+    }
+
     private static boolean isSize(DecodedTiles tiles, int width, int height) {
         return tiles.streamWidth() == width && tiles.streamHeight() == height;
     }
@@ -400,6 +518,22 @@ class ViewerSessionTest {
 
         void onTiles(Consumer<DecodedTiles> hook) {
             onTilesHook = hook;
+        }
+
+        /** Whether UDP batches are taken (a view exists); when not, they are refused without a throw. */
+        private volatile boolean udpViewReady = true;
+
+        @Override
+        public boolean onUdpTiles(DecodedTiles decoded) {
+            if (!udpViewReady) {
+                return false;
+            }
+            onTiles(decoded);
+            return true;
+        }
+
+        void udpViewReady(boolean ready) {
+            udpViewReady = ready;
         }
 
         @Override

@@ -202,17 +202,24 @@ final class TileDecoder implements AutoCloseable {
         if (area > MAX_RECT_PIXELS) {
             throw new IllegalArgumentException("Rectangle too large: " + rect);
         }
-        int[] argb;
-        switch (rect.encoding()) {
+        return new DecodedTiles.Patch(rect.x(), rect.y(), w, h, pixels(rect.encoding(), rect.data(), w, h));
+    }
+
+    /**
+     * Decodes one {@code w x h} rectangle payload to ARGB (shared with {@link UdpTileDecoder}); the caller has
+     * checked {@code w * h <= }{@link #MAX_RECT_PIXELS}.
+     */
+    static int[] pixels(TileUpdate.Encoding encoding, byte[] data, int w, int h) throws IOException {
+        return switch (encoding) {
             case SOLID -> {
-                argb = new int[Math.toIntExact(area)];
-                Arrays.fill(argb, RectPixels.decodeSolid(rect.data()));
+                int[] argb = new int[Math.toIntExact((long) w * h)];
+                Arrays.fill(argb, RectPixels.decodeSolid(data));
+                yield argb;
             }
-            case LOSSLESS -> argb = RectPixels.decodeLossless(rect.data(), w, h);
-            case JPEG -> argb = PixelConversion.toArgb(readJpeg(rect.data(), w, h));
-            default -> throw new IllegalArgumentException("Unsupported encoding " + rect.encoding());
-        }
-        return new DecodedTiles.Patch(rect.x(), rect.y(), w, h, argb);
+            case LOSSLESS -> RectPixels.decodeLossless(data, w, h);
+            case JPEG -> PixelConversion.toArgb(readJpeg(data, w, h));
+            default -> throw new IllegalArgumentException("Unsupported encoding " + encoding);
+        };
     }
 
     /** Reads the image only after its header says it is exactly {@code w x h}, so a lying size allocates nothing. */

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import org.junit.jupiter.api.Test;
+import pl.mtech.mremora.protocol.DevProtocolVersion;
 
 class AgentMainTest {
 
@@ -34,5 +35,29 @@ class AgentMainTest {
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("Usage");
         }
+    }
+
+    @Test
+    void defaultConfigOffersDefaultVersionWithoutDevProperty() {
+        int version = DevProtocolVersion.parse(null, AgentConfig.DEFAULT_PROTOCOL_VERSION,
+                AgentConfig.HIGHEST_PROTOCOL_VERSION);
+
+        assertThat(AgentConfig.defaults(7500).withMaxProtocolVersion(version)).isEqualTo(AgentConfig.defaults(7500));
+    }
+
+    @Test
+    void devProtocolVersionThreeIsAcceptedByTheAgent() {
+        int version = DevProtocolVersion.parse("3", AgentConfig.DEFAULT_PROTOCOL_VERSION,
+                AgentConfig.HIGHEST_PROTOCOL_VERSION);
+
+        assertThat(AgentConfig.defaults(7500).withMaxProtocolVersion(version).maxProtocolVersion()).isEqualTo(3);
+    }
+
+    @Test
+    void devProtocolVersionAboveAgentHighestIsRejected() {
+        assertThatThrownBy(() -> DevProtocolVersion.parse("4", AgentConfig.DEFAULT_PROTOCOL_VERSION,
+                AgentConfig.HIGHEST_PROTOCOL_VERSION))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("mremora.dev.protocolVersion");
     }
 }

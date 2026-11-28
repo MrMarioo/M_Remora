@@ -16,7 +16,9 @@ enum MessageType {
     MOUSE_WHEEL(0x22),
     STREAM_CONFIG(0x23),
     HEARTBEAT(0x30),
-    BYE(0x31);
+    BYE(0x31),
+    UDP_SETUP(0x32),
+    TRANSPORT_STATE(0x33);
 
     final int code;
 

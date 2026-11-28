@@ -19,8 +19,8 @@ public record AgentConfig(int port, Duration handshakeTimeout, Duration heartbea
 
     public static final int DEFAULT_PORT = 7420;
 
-    /** Highest protocol version this agent can speak (v2: tiles), whatever {@link Hello#PROTOCOL_VERSION} says. */
-    public static final int HIGHEST_PROTOCOL_VERSION = 2;
+    /** Highest protocol version this agent can speak (v3: UDP setup, picture still over TCP), whatever {@link Hello#PROTOCOL_VERSION} says. */
+    public static final int HIGHEST_PROTOCOL_VERSION = 3;
 
     public AgentConfig {
         if (port < 0 || port > 0xFFFF) {
@@ -48,6 +48,11 @@ public record AgentConfig(int port, Duration handshakeTimeout, Duration heartbea
     public static AgentConfig defaults(int port) {
         return new AgentConfig(port, Duration.ofSeconds(5), Duration.ofSeconds(2), Duration.ofSeconds(6), 30,
                 DEFAULT_PROTOCOL_VERSION);
+    }
+
+    /** A copy offering {@code version} instead (e.g. the developer opt-in {@code mremora.dev.protocolVersion}). */
+    public AgentConfig withMaxProtocolVersion(int version) {
+        return new AgentConfig(port, handshakeTimeout, heartbeatInterval, idleTimeout, maxFps, version);
     }
 
     private static void requirePositive(Duration d, String name) {

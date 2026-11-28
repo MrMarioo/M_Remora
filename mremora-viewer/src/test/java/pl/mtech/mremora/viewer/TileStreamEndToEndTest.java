@@ -11,15 +11,17 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.function.IntBinaryOperator;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import pl.mtech.mremora.agent.AgentConfig;
 import pl.mtech.mremora.agent.AgentServer;
 import pl.mtech.mremora.agent.PairingCodes;
+import pl.mtech.mremora.protocol.TransportState;
 import pl.mtech.mremora.testkit.MutableClock;
 
 /**
- * The v2 tile stream end to end, pixel exact: a real {@link AgentServer} (tile encoder, codec) over loopback into a
- * {@link ViewerSession} ({@link TileDecoder}), whose patches are applied to a composite image.
+ * The tile stream (v2 and v3) end to end, pixel exact: a real {@link AgentServer} (tile encoder, codec) over
+ * loopback into a {@link ViewerSession} ({@link TileDecoder}), whose patches are applied to a composite image.
  *
  * <p>The content is lossless only (flat rectangles and 2-colour stripes, far below 64 colours per tile) and constant
  * over 2x2 blocks with even edges, so the agent's 2:1 downscale is exact and the expected stream pixels do not
@@ -38,6 +40,8 @@ class TileStreamEndToEndTest {
     private final CompositingListener listener = new CompositingListener();
     private AgentServer server;
     private ViewerSession session;
+    /** v3 (picture over UDP): a frame may span several batches; see {@link #nextComposite}. */
+    private boolean composeUntilSettled;
 
     @AfterEach
     void tearDown() throws Exception {
@@ -52,8 +56,14 @@ class TileStreamEndToEndTest {
         }
     }
 
-    @Test
-    void compositeEqualsTheAgentStreamAfterEveryFrame() throws Exception {
+    /**
+     * v3 must render exactly like v2. Over UDP a change may arrive in several UI batches (and lost or unconfirmed
+     * rectangles are resent), so the v3 run composes batches until the composite stops differing (up to
+     * {@code WAIT}) before the same pixel-exact check.
+     */
+    @ParameterizedTest(name = "protocol v{0}")
+    @ValueSource(ints = {2, 3})
+    void compositeEqualsTheAgentStreamAfterEveryFrame(int version) throws Exception {
         IntBinaryOperator a = (x, y) -> {
             if (x >= 10 && x < 50 && y >= 20 && y < 60) {
                 return 0xAA0000;
@@ -72,12 +82,13 @@ class TileStreamEndToEndTest {
         desktop.setImage(image(a));
         AgentConfig defaults = AgentConfig.defaults(0);
         server = new AgentServer(new AgentConfig(0, defaults.handshakeTimeout(), defaults.heartbeatInterval(),
-                defaults.idleTimeout(), defaults.maxFps(), 2), desktop, desktop,
+                defaults.idleTimeout(), defaults.maxFps(), version), desktop, desktop,
                 new PairingCodes(clock, new Random(1)), ui);
         int port = server.start();
-        session = ViewerSession.open("127.0.0.1", port, ui.lastCode(), 2, Runnable::run, listener)
+        session = ViewerSession.open("127.0.0.1", port, ui.lastCode(), version, Runnable::run, listener)
                 .get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
-        assertThat(session.protocolVersion()).isEqualTo(2);
+        assertThat(session.protocolVersion()).isEqualTo(version);
+        composeUntilSettled = version >= 3;
 
         expectFrame(W, H, a, 1);
 
@@ -95,21 +106,48 @@ class TileStreamEndToEndTest {
 
         session.viewChanged(W, H, 1); // back to full resolution
         expectFrame(W, H, d, 1);
+        if (version >= 3) {
+            assertThat(server.lastUdpOutcome()).contains(TransportState.Mode.UDP);
+            assertThat(server.udpImageStats().orElseThrow().packetsSent()).as("picture went over UDP").isPositive();
+        }
     }
 
     /** Waits for the next frame and checks the composite against {@code source} sampled every {@code step} px. */
     private void expectFrame(int width, int height, IntBinaryOperator source, int step) throws InterruptedException {
-        Composite frame = listener.frames.poll(WAIT.toMillis(), TimeUnit.MILLISECONDS);
-        assertThat(frame).as("frame within %s", WAIT).isNotNull();
-        assertThat(frame.width).isEqualTo(width);
-        assertThat(frame.height).isEqualTo(height);
         int[] expected = new int[width * height];
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
                 expected[y * width + x] = 0xFF000000 | source.applyAsInt(x * step, y * step);
             }
         }
+        Composite frame = nextComposite(width, height, expected);
+        assertThat(frame).as("frame within %s", WAIT).isNotNull();
+        assertThat(frame.width).isEqualTo(width);
+        assertThat(frame.height).isEqualTo(height);
         assertThat(frame.argb).isEqualTo(expected);
+    }
+
+    /**
+     * v2: the next composite (one per frame). v3: composites until one shows {@code expected} or {@code WAIT}
+     * passes; returns the last one seen, so a mismatch still fails the unchanged assertion.
+     */
+    private Composite nextComposite(int width, int height, int[] expected) throws InterruptedException {
+        if (!composeUntilSettled) {
+            return listener.frames.poll(WAIT.toMillis(), TimeUnit.MILLISECONDS);
+        }
+        long deadline = System.nanoTime() + WAIT.toNanos();
+        Composite last = null;
+        while (true) {
+            long left = deadline - System.nanoTime();
+            Composite c = left > 0 ? listener.frames.poll(left, TimeUnit.NANOSECONDS) : listener.frames.poll();
+            if (c == null) {
+                return last;
+            }
+            last = c;
+            if (c.width == width && c.height == height && java.util.Arrays.equals(c.argb, expected)) {
+                return c;
+            }
+        }
     }
 
     private static BufferedImage image(IntBinaryOperator source) {

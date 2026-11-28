@@ -266,6 +266,16 @@ public final class ViewerApp extends Application {
             }
         }
 
+        /** UDP rectangles may come before the view exists (before {@code TransportState}): not taken then. */
+        @Override
+        public boolean onUdpTiles(DecodedTiles tiles) {
+            if (this != attempt || sessionView == null) {
+                return false; // dropped: the agent resends these tiles
+            }
+            sessionView.onTiles(tiles);
+            return true;
+        }
+
         @Override
         public void onClosed(String reason) {
             if (this != attempt) {

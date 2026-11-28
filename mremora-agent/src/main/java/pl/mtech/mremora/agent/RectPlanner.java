@@ -9,7 +9,14 @@ import pl.mtech.mremora.protocol.TileUpdate.Encoding;
 /** Classifies dirty tiles and merges horizontal runs of the same class into rectangles. */
 final class RectPlanner {
 
+    /** Longest run of tiles merged into one rectangle on the v2 (TCP) path. */
     static final int MAX_MERGE_TILES = 8;
+    /**
+     * Longest run on the UDP path. Measured with {@code StreamBenchmark#udpRectSizes} at 1600x900 (plan 2, task 10):
+     * 8 tiles keep the median rectangle at ≤ 10 fragments (VIDEO; max 12) and need 27 % fewer bytes for the first
+     * frame than 4 tiles (6 % fewer for VIDEO), so the v2 width is kept.
+     */
+    static final int UDP_MAX_MERGE_TILES = 8;
     static final int LOSSLESS_MAX_COLORS = 64;
 
     /** {@code solidColor} is meaningful only for {@link Encoding#SOLID}. */
@@ -19,7 +26,16 @@ final class RectPlanner {
     private RectPlanner() {
     }
 
+    /** Plans with {@link #MAX_MERGE_TILES}. */
     static List<PlannedRect> plan(int[] pixels, int width, int height, BitSet dirty) {
+        return plan(pixels, width, height, dirty, MAX_MERGE_TILES);
+    }
+
+    /** @param maxMergeTiles longest horizontal run of tiles in one rectangle, at least 1 */
+    static List<PlannedRect> plan(int[] pixels, int width, int height, BitSet dirty, int maxMergeTiles) {
+        if (maxMergeTiles < 1) {
+            throw new IllegalArgumentException("maxMergeTiles must be >= 1: " + maxMergeTiles);
+        }
         int cols = DirtyTiles.cols(width);
         int rows = DirtyTiles.rows(height);
         var out = new ArrayList<PlannedRect>();
@@ -35,7 +51,7 @@ final class RectPlanner {
                 Encoding encoding = encodingOf(color);
                 int solid = color >= 0 ? color : 0;
                 int end = col + 1;
-                while (end < cols && end - col < MAX_MERGE_TILES && dirty.get(row * cols + end)
+                while (end < cols && end - col < maxMergeTiles && dirty.get(row * cols + end)
                         && classify(pixels, width, height, end, row, scratch) == color) {
                     end++;
                 }

@@ -108,8 +108,9 @@ final class SessionView {
     }
 
     /**
-     * Applies a tile frame (v2) to the stream image; a new buffer is created when the stream size changes (the
-     * agent then sends a full frame).
+     * Applies a tile frame (v2) or a UDP batch of changed rectangles (v3) to the stream image; a new buffer is
+     * created when the stream size changes (the agent then sends a full frame). The overlay's "fps" counts these
+     * calls, so on the UDP path it is applied batches of changes per second, not complete frames.
      */
     void onTiles(DecodedTiles tiles) {
         ensureImage(tiles.streamWidth(), tiles.streamHeight());

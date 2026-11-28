@@ -9,8 +9,16 @@ import java.util.concurrent.atomic.AtomicReference;
 import javax.swing.JOptionPane;
 import javax.swing.SwingUtilities;
 import pl.mtech.mremora.logging.LogFiles;
+import pl.mtech.mremora.protocol.DevProtocolVersion;
+import pl.mtech.mremora.protocol.netty.LinkImpairment;
 
-/** Runnable entry point of the agent: {@code AgentMain [--port N]}. */
+/**
+ * Runnable entry point of the agent: {@code AgentMain [--port N]}.
+ *
+ * <p>Developer options (system properties, each logged as a {@code WARNING} when set; an invalid value stops the
+ * start): {@value DevProtocolVersion#PROPERTY} (highest protocol version offered, e.g. {@code 3} for the UDP
+ * channel) and {@value LinkImpairment#DEV_PROPERTY} (impairs the UDP socket, see {@link LinkImpairment#parse}).
+ */
 public final class AgentMain {
 
     static final int DEFAULT_PORT = 7420;
@@ -80,8 +88,17 @@ public final class AgentMain {
             return;
         }
         int port;
+        AgentConfig config;
+        LinkImpairment udpImpairment;
         try {
             port = parsePort(args);
+            config = AgentConfig.defaults(port).withMaxProtocolVersion(DevProtocolVersion.fromSystemProperty(
+                    AgentConfig.DEFAULT_PROTOCOL_VERSION, AgentConfig.HIGHEST_PROTOCOL_VERSION));
+            udpImpairment = LinkImpairment.fromSystemProperty();
+            if (!udpImpairment.equals(LinkImpairment.NONE) && config.maxProtocolVersion() < 3) {
+                LOG.log(System.Logger.Level.WARNING, "{0} has no effect: protocol v{1} has no UDP socket (set {2}=3)",
+                        LinkImpairment.DEV_PROPERTY, config.maxProtocolVersion(), DevProtocolVersion.PROPERTY);
+            }
         } catch (IllegalArgumentException e) {
             fail(e.getMessage(), 2);
             return;
@@ -100,7 +117,8 @@ public final class AgentMain {
             }
             System.exit(0);
         }));
-        AgentServer server = new AgentServer(AgentConfig.defaults(port), capturer, injector, codes, window);
+        AgentServer server = new AgentServer(config, capturer, injector, codes, window);
+        server.udpImpairment(udpImpairment);
         serverRef.set(server);
         int bound;
         try {

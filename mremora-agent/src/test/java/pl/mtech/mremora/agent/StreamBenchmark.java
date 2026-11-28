@@ -6,12 +6,18 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.BitSet;
 import java.util.List;
 import java.util.Locale;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import pl.mtech.mremora.protocol.StreamConfig;
 import pl.mtech.mremora.protocol.TileUpdate;
+import pl.mtech.mremora.protocol.udp.TileDelivery;
+import pl.mtech.mremora.protocol.udp.TileFragment;
+import pl.mtech.mremora.protocol.udp.UdpImageSender;
+import pl.mtech.mremora.protocol.udp.UdpPacketCodec;
 
 /**
  * Measures encoder output over synthetic scenarios.
@@ -125,5 +131,80 @@ final class StreamBenchmark {
     private static int firstFrameBytes(Scenario scenario, StreamConfig config) {
         var screen = new SyntheticScreen(scenario, 2560, 1440, SEED);
         return tileEncoder(config, 2560, 1440).encodeNext(screen.next());
+    }
+
+    private static final List<Scenario> UDP_SCENARIOS = List.of(Scenario.TYPING, Scenario.WINDOW_DRAG, Scenario.VIDEO);
+    private static final int[] UDP_MERGE_WIDTHS = {2, 4, 8};
+    /** Wire overhead of one fragment: fragment header plus packet header and MAC. */
+    private static final int FRAGMENT_OVERHEAD =
+            TileFragment.HEADER + UdpPacketCodec.MAX_DATAGRAM - UdpPacketCodec.MAX_PAYLOAD;
+
+    /** Fragments of one encoded rectangle, as {@code RectFragmenter} cuts it. */
+    static int fragments(int dataLength) {
+        return Math.max(1, (dataLength + TileFragment.MAX_DATA - 1) / TileFragment.MAX_DATA);
+    }
+
+    /** Encoded sizes of the rectangles of a run of UDP frames. */
+    record RectSizes(int[] bytes, int frames) {
+
+        int percentile(int[] sorted, double q) {
+            return sorted.length == 0 ? 0 : sorted[(int) Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
+        }
+
+        String row(String label) {
+            int[] b = bytes.clone();
+            Arrays.sort(b);
+            int[] f = Arrays.stream(b).map(StreamBenchmark::fragments).toArray();
+            long data = Arrays.stream(b).asLongStream().sum();
+            long wire = data + (long) Arrays.stream(f).sum() * FRAGMENT_OVERHEAD;
+            return String.format(Locale.ROOT, "%-22s %-7d %-8d %-8d %-8d %-7d %-7d %-6d %-11.1f %.1f%n",
+                    label, b.length, percentile(b, 0.5), percentile(b, 0.9), b.length == 0 ? 0 : b[b.length - 1],
+                    percentile(f, 0.5), percentile(f, 0.9), f.length == 0 ? 0 : f[f.length - 1],
+                    wire / 1024.0 / frames, data / 1024.0 / frames);
+        }
+    }
+
+    /** The first (full) frame and the following {@code frames} frames of {@code scenario} over UDP. */
+    static RectSizes[] udpRectSizes(Scenario scenario, int maxMergeTiles, int frames) {
+        var source = new SyntheticScreen(scenario, 2560, 1440, SEED);
+        var screen = new MutableScreen(new BufferedImage(2560, 1440, BufferedImage.TYPE_INT_RGB));
+        var encoder = new TileFrameEncoder(screen);
+        encoder.configure(new StreamConfig(1600, 900));
+        var none = new TileDelivery.Forced(0, new BitSet());
+        screen.set(source.next());
+        int[] first = sizes(encoder.nextForUdp(none, maxMergeTiles).rects());
+        var steady = new ArrayList<Integer>();
+        for (int i = 0; i < frames; i++) {
+            screen.set(source.next());
+            for (int b : sizes(encoder.nextForUdp(none, maxMergeTiles).rects())) {
+                steady.add(b);
+            }
+        }
+        return new RectSizes[] {
+            new RectSizes(first, 1), new RectSizes(steady.stream().mapToInt(Integer::intValue).toArray(), frames)};
+    }
+
+    private static int[] sizes(List<UdpImageSender.OutgoingRect> rects) {
+        return rects.stream().mapToInt(r -> r.data().length).toArray();
+    }
+
+    /** Chooses {@link RectPlanner#UDP_MAX_MERGE_TILES}: rectangle sizes and fragments per merge width. */
+    @Test
+    @EnabledIfSystemProperty(named = "mremora.bench", matches = "true")
+    void udpRectSizes() throws IOException {
+        var table = new StringBuilder("UDP rects @1600x900 (2560x1440 source); bytes = encoded rect, frag = fragments"
+                + " of " + TileFragment.MAX_DATA + " B; KB/frame incl. " + FRAGMENT_OVERHEAD + " B/fragment overhead\n");
+        table.append("scenario/merge/frames  rects   med B    p90 B    max B    medFr   p90Fr   maxFr  wireKB/fr   dataKB/fr\n");
+        for (Scenario s : UDP_SCENARIOS) {
+            for (int merge : UDP_MERGE_WIDTHS) {
+                RectSizes[] r = udpRectSizes(s, merge, 60);
+                table.append(r[0].row(s + "/" + merge + "/first"));
+                table.append(r[1].row(s + "/" + merge + "/next60"));
+            }
+        }
+        System.out.print(table);
+        Path out = Path.of("target", "mremora-bench.txt");
+        Files.createDirectories(out.getParent());
+        Files.writeString(out, table, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
     }
 }

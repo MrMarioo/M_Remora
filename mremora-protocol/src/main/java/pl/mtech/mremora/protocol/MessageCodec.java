@@ -68,6 +68,12 @@ public final class MessageCodec {
                     .put(buttonCode(button)).put((byte) (pressed ? 1 : 0))
                     .flip();
             case MouseWheel(int notches) -> frame(MessageType.MOUSE_WHEEL, 4).putInt(notches).flip();
+            case UdpSetup setup -> frame(MessageType.UDP_SETUP, 2 + 4 + UdpSetup.KEY_LENGTH)
+                    .putShort((short) setup.udpPort()).putInt(setup.sessionId()).put(setup.key())
+                    .flip();
+            case TransportState(TransportState.Mode mode, int epoch) -> frame(MessageType.TRANSPORT_STATE, 3)
+                    .put(modeCode(mode)).putShort((short) epoch)
+                    .flip();
             case Heartbeat() -> frame(MessageType.HEARTBEAT, 0).flip();
             case Bye(String reason) -> {
                 byte[] reasonBytes = utf8(reason);
@@ -150,6 +156,13 @@ public final class MessageCodec {
         };
     }
 
+    private static byte modeCode(TransportState.Mode mode) {
+        return switch (mode) {
+            case TCP -> 1;
+            case UDP -> 2;
+        };
+    }
+
     private static byte buttonCode(MouseButton.Button button) {
         return switch (button) {
             case LEFT -> 1;
@@ -229,6 +242,8 @@ public final class MessageCodec {
                 case MOUSE_MOVE -> new MouseMove(p.getInt(), p.getInt());
                 case MOUSE_BUTTON -> new MouseButton(button(p.get()), pressed(p.get()));
                 case MOUSE_WHEEL -> new MouseWheel(p.getInt());
+                case UDP_SETUP -> udpSetup(p);
+                case TRANSPORT_STATE -> new TransportState(mode(p.get()), p.getShort() & 0xFFFF);
                 case HEARTBEAT -> new Heartbeat();
                 case BYE -> new Bye(string(p));
             };
@@ -243,6 +258,14 @@ public final class MessageCodec {
             throw new ProtocolException(type + " payload has " + p.remaining() + " unexpected trailing bytes");
         }
         return message;
+    }
+
+    private static UdpSetup udpSetup(ByteBuffer p) {
+        int port = p.getShort() & 0xFFFF;
+        int sessionId = p.getInt();
+        byte[] key = new byte[UdpSetup.KEY_LENGTH];
+        p.get(key);
+        return new UdpSetup(port, sessionId, key);
     }
 
     private static TileUpdate tileUpdate(ByteBuffer p) {
@@ -314,6 +337,14 @@ public final class MessageCodec {
         return switch (code) {
             case 1 -> FrameUpdate.Format.JPEG;
             default -> throw new ProtocolException("Unknown frame format " + code);
+        };
+    }
+
+    private static TransportState.Mode mode(byte code) {
+        return switch (code) {
+            case 1 -> TransportState.Mode.TCP;
+            case 2 -> TransportState.Mode.UDP;
+            default -> throw new ProtocolException("Unknown transport mode " + code);
         };
     }
 

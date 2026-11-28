@@ -24,6 +24,7 @@ public final class ViewerMain {
     public static void main(String[] args) {
         LogFiles.install("viewer");
         try {
+            AgentConnection.checkDevProperties(); // a bad value surfaces as "could not start: <property> ..."
             Application.launch(ViewerApp.class, args);
         } catch (RuntimeException e) { // e.g. no JavaFX toolkit: the packaged launcher has no console
             LOG.log(Level.ERROR, "Unexpected start failure", e);

@@ -10,11 +10,22 @@ import pl.mtech.mremora.protocol.FrameUpdate;
 import pl.mtech.mremora.protocol.ScreenInfo;
 import pl.mtech.mremora.protocol.StreamConfig;
 import pl.mtech.mremora.protocol.TileUpdate;
+import pl.mtech.mremora.protocol.TransportState;
+import pl.mtech.mremora.protocol.udp.CompleteRect;
 
 /**
  * One viewer session without UI: an {@link AgentConnection} whose frames are decoded by a {@link FrameDecoder}
- * (protocol v1) or a {@link TileDecoder} (v2) and whose mouse input comes from an {@link InputTranslator}.
- * On v2 a tile frame the decoder cannot read ends the session with {@code Bye("protocol error")}.
+ * (protocol v1) or a {@link TileDecoder} (v2, and v3 with {@code TransportState(TCP)}) and whose mouse input comes
+ * from an {@link InputTranslator}. On v2 a tile frame the decoder cannot read ends the session with
+ * {@code Bye("protocol error")}.
+ *
+ * <p>On v3 with {@code TransportState(UDP)} the picture comes as UDP rectangles, decoded by a {@link UdpTileDecoder}
+ * and acknowledged over UDP (never with {@code FrameAck}); a rectangle that cannot be decoded, or a batch the UI cannot
+ * take yet, is reported dropped (the agent resends its tiles) and the session goes on, while a stream larger than the
+ * agent's screen or a throwing {@link Listener#onUdpTiles} ends it with {@code Bye("protocol error")}. The paths
+ * are chosen by what arrives, not by the {@code TransportState}: UDP rectangles are applied whenever they come,
+ * also before the {@code TransportState} that announces them, which only informs (the agent sends no TCP tiles once
+ * it decided UDP).
  *
  * <p>All {@link Listener} calls go through the {@code ui} executor; the UI uses {@link #input()} only on its own thread
  * and never waits for the network.
@@ -39,6 +50,17 @@ final class ViewerSession {
         void onTiles(DecodedTiles tiles);
 
         /**
+         * A decoded batch of changed rectangles of the UDP picture (protocol v3, {@link UdpTileDecoder}) is ready to
+         * be applied to the stream image. Returns whether it was applied: {@code false} (e.g. the view does not exist
+         * yet) reports its rectangles dropped, so the agent sends their tiles again; if this throws, the session
+         * ends with {@code Bye("protocol error")}. By default it is applied like a tile frame.
+         */
+        default boolean onUdpTiles(DecodedTiles tiles) {
+            onTiles(tiles);
+            return true;
+        }
+
+        /**
          * The session ended; called exactly once. No {@link #onFrame} or {@link #onTiles} follows it only when
          * {@code ui} is a single-threaded FIFO executor such as {@code Platform::runLater}.
          */
@@ -57,7 +79,8 @@ final class ViewerSession {
     }
 
     /**
-     * Connects to an agent; see {@link AgentConnection#connect} for the handshake.
+     * Connects to an agent, proposing {@link AgentConnection#defaultProtocolVersion()}; see
+     * {@link AgentConnection#connect} for the handshake.
      *
      * @param ui runs the listener calls, normally {@code Platform::runLater}
      * @return completes with the established session, or fails with the same exception as
@@ -65,7 +88,7 @@ final class ViewerSession {
      */
     static CompletableFuture<ViewerSession> open(String host, int port, String pairingCode, Executor ui,
                                                  Listener listener) {
-        return open(host, port, pairingCode, AgentConnection.DEFAULT_PROTOCOL_VERSION, ui, listener);
+        return open(host, port, pairingCode, AgentConnection.defaultProtocolVersion(), ui, listener);
     }
 
     /** Like {@link #open(String, int, String, Executor, Listener)}, proposing {@code protocolVersion}. */
@@ -92,6 +115,19 @@ final class ViewerSession {
                     established.thenAccept(c -> c.sendFrameAck(decoded.sequence()));
                 },
                 reason -> established.thenAccept(c -> c.abort(reason)));
+        UdpTileDecoder udpTiles = new UdpTileDecoder(() -> awaitScreen(established), ui, listener::onUdpTiles,
+                new UdpTileDecoder.Outcomes() {
+                    @Override
+                    public void applied(long rectId) {
+                        established.thenAccept(c -> c.udpRectApplied(rectId));
+                    }
+
+                    @Override
+                    public void dropped(long rectId) {
+                        established.thenAccept(c -> c.udpRectDropped(rectId));
+                    }
+                },
+                reason -> established.thenAccept(c -> c.abort(reason)));
         AgentConnection.Listener connectionListener = new AgentConnection.Listener() {
             @Override
             public void onFrame(FrameUpdate frame) {
@@ -104,10 +140,21 @@ final class ViewerSession {
             }
 
             @Override
+            public void onUdpRect(CompleteRect rect) {
+                udpTiles.offer(rect);
+            }
+
+            @Override
+            public void onTransportState(TransportState state) {
+                LOG.log(Level.INFO, "Picture transport: {0}", state);
+            }
+
+            @Override
             public void onClosed(String reason) {
                 // Closed before onClosed is queued: no frame delivery runs after it on a FIFO executor.
                 frames.close();
                 tiles.close();
+                udpTiles.close();
                 ui.execute(() -> listener.onClosed(reason));
             }
         };
@@ -117,6 +164,7 @@ final class ViewerSession {
         } catch (RuntimeException e) {
             frames.close();
             tiles.close();
+            udpTiles.close();
             throw e;
         }
         CompletableFuture<ViewerSession> result = new CompletableFuture<>();
@@ -124,6 +172,7 @@ final class ViewerSession {
             if (error != null) {
                 frames.close();
                 tiles.close();
+                udpTiles.close();
                 result.completeExceptionally(error);
                 return;
             }

@@ -25,6 +25,7 @@ import pl.mtech.mremora.protocol.MouseMove;
 import pl.mtech.mremora.protocol.MouseWheel;
 import pl.mtech.mremora.protocol.StreamConfig;
 import pl.mtech.mremora.protocol.TileUpdate;
+import pl.mtech.mremora.protocol.TransportState;
 
 /**
  * The live remote session on one authenticated channel: streams frames, feeds mouse input to a dedicated thread
@@ -32,9 +33,11 @@ import pl.mtech.mremora.protocol.TileUpdate;
  *
  * <p>Protocol v1 streams whole JPEG frames through a one-frame slot. Protocol v2 streams changed tiles, with at
  * most one frame waiting for the viewer's {@code FrameAck} ({@link AckGate}); {@code StreamConfig} resizes the
- * stream from the next frame on.
+ * stream from the next frame on. Protocol v3 starts only after the UDP probe phase: over TCP like v2
+ * ({@link #announceAndStart}), or over UDP ({@link #announceAndStartUdp}), where a {@link UdpCaptureLoop} hands each
+ * capture to a {@link UdpImageChannel} and the UDP sender's gate replaces the {@code FrameAck}.
  *
- * <p>Threads: a capture thread fills the slot (v1) or hands each frame's parts over (v2); the channel's event
+ * <p>Threads: a capture thread fills the slot (v1) or hands each frame's parts over (v2, v3); the channel's event
  * loop writes frames and owns all mutable state; a single input thread injects mouse events and, last, releases
  * held buttons.
  */
@@ -52,12 +55,17 @@ final class AgentSession extends ChannelInboundHandlerAdapter {
 
     private final Channel channel;
     private final Runnable onEnded;
+    private final Runnable onEnd;
     private final BlockingQueue<FrameUpdate> slot = new ArrayBlockingQueue<>(1);
-    /** v2 only, otherwise {@code null}. */
+    /** v2 and v3 (tile stream), otherwise {@code null}. */
     private final AckGate gate;
-    /** v2 only, otherwise {@code null}. */
+    /** v2 and v3 (tile stream), otherwise {@code null}. */
     private final TileFrameEncoder tileEncoder;
-    private final Thread captureThread;
+    private final Duration captureInterval;
+    /** Event loop; replaced by {@link #announceAndStartUdp} before it starts. */
+    private Thread captureThread;
+    /** The picture over UDP (v3 decided UDP), otherwise {@code null}. Event loop. */
+    private UdpImageChannel udpImage;
     private final InputDispatcher dispatcher;
     private final ExecutorService inputExecutor =
             Executors.newSingleThreadExecutor(r -> Thread.ofPlatform().name("mremora-input").unstarted(r));
@@ -68,17 +76,22 @@ final class AgentSession extends ChannelInboundHandlerAdapter {
     // Event-loop state.
     private boolean frameInFlight;
     private boolean ended;
+    private boolean started;
 
     /**
-     * @param protocolVersion the negotiated version, {@code 1} or {@code 2}
+     * @param protocolVersion the negotiated version, {@code 1..3}
+     * @param onEnd           run on the event loop the moment the session ends, before buttons are released
+     *                        (e.g. to stop the session's UDP link at once); at most once
      * @param onEnded         run on the event loop once the session has ended and held buttons were released
      */
     AgentSession(Channel channel, ScreenCapturer capturer, InputInjector injector, int maxFps, int protocolVersion,
-            Runnable onEnded) {
+            Runnable onEnd, Runnable onEnded) {
         this.channel = Objects.requireNonNull(channel, "channel");
+        this.onEnd = Objects.requireNonNull(onEnd, "onEnd");
         this.onEnded = Objects.requireNonNull(onEnded, "onEnded");
         this.dispatcher = new InputDispatcher(injector);
         Duration interval = Duration.ofMillis(1000 / maxFps);
+        this.captureInterval = interval;
         Runnable loop = switch (protocolVersion) {
             case 1 -> {
                 this.gate = null;
@@ -86,23 +99,65 @@ final class AgentSession extends ChannelInboundHandlerAdapter {
                 var producer = new FrameProducer(capturer, new JpegFrameEncoder(JpegFrameEncoder.DEFAULT_QUALITY));
                 yield new CaptureLoop(producer::next, slot, this::frameReady, this::captureFailed, interval);
             }
-            case 2 -> {
+            case 2, 3 -> {
                 this.gate = new AckGate();
                 this.tileEncoder = new TileFrameEncoder(capturer);
                 yield new TileCaptureLoop(tileEncoder::next, gate, this::tilesReady, this::captureFailed, interval);
             }
             default -> throw new IllegalArgumentException("Unsupported protocol version " + protocolVersion);
         };
-        this.captureThread = Thread.ofPlatform().name("mremora-capture").daemon(true).unstarted(loop);
+        this.captureThread = captureThread(loop);
+    }
+
+    private static Thread captureThread(Runnable loop) {
+        return Thread.ofPlatform().name("mremora-capture").daemon(true).unstarted(loop);
     }
 
     Channel channel() {
         return channel;
     }
 
-    /** Event loop: starts capturing. Call after the handler is in the pipeline. */
+    /** Event loop: starts capturing. Call after the handler is in the pipeline. A no-op once ended or started. */
     void start() {
+        if (ended || started) {
+            return;
+        }
+        started = true;
         captureThread.start();
+    }
+
+    /**
+     * Event loop: sends {@code first} (v3: the {@code TransportState}), then starts capturing, so no frame can
+     * overtake it. A no-op once the session has ended.
+     */
+    void announceAndStart(Message first) {
+        if (ended) {
+            return;
+        }
+        channel.writeAndFlush(first).addListener((ChannelFutureListener) f -> {
+            if (!f.isSuccess()) {
+                LOG.log(Level.DEBUG, "Writing {0} failed: {1}", first, String.valueOf(f.cause()));
+                end(CONNECTION_LOST, false);
+            }
+        });
+        start();
+    }
+
+    /**
+     * Event loop, v3 only: the picture goes over UDP through {@code image}. Sends
+     * {@code TransportState(UDP, epoch)} (the encoder's epoch, 0 before the first capture), then starts a
+     * {@link UdpCaptureLoop}. A no-op (closing {@code image}) once the session has ended or capturing started.
+     */
+    void announceAndStartUdp(UdpImageChannel image) {
+        Objects.requireNonNull(image, "image");
+        if (ended || started || tileEncoder == null) {
+            image.close();
+            return;
+        }
+        udpImage = image;
+        captureThread = captureThread(new UdpCaptureLoop(tileEncoder::nextForUdp, image, this::captureFailed,
+                captureInterval));
+        announceAndStart(new TransportState(TransportState.Mode.UDP, tileEncoder.epoch()));
     }
 
     /** Any thread: asks the event loop to end the session with {@code Bye(reason)}. */
@@ -189,7 +244,7 @@ final class AgentSession extends ChannelInboundHandlerAdapter {
         });
     }
 
-    /** Event loop: writes the parts of one v2 frame; the gate keeps the next one back until the ack. */
+    /** Event loop: writes the parts of one v2/v3 frame; the gate keeps the next one back until the ack. */
     private void writeTiles(List<TileUpdate> parts) {
         if (ended) {
             return;
@@ -212,9 +267,19 @@ final class AgentSession extends ChannelInboundHandlerAdapter {
         }
         ended = true;
         LOG.log(Level.DEBUG, "Ending session: {0}", reason);
+        // Interrupt first: the end hook closes the UDP link (and its image channel), and a UDP capture thread that
+        // sees the channel closed without an interrupt warns that UDP died mid-session.
         captureThread.interrupt();
+        try {
+            onEnd.run();
+        } catch (RuntimeException e) {
+            LOG.log(Level.ERROR, "Session end hook failed", e);
+        }
         if (gate != null) {
             gate.close(); // a capture thread parked on the gate must not wait for an ack that never comes
+        }
+        if (udpImage != null) {
+            udpImage.close(); // likewise for one parked on the UDP gate (the link's close closes it too)
         }
         slot.clear();
         inputClosed = true;

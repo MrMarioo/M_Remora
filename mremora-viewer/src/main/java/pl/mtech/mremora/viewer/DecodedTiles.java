@@ -3,8 +3,9 @@ package pl.mtech.mremora.viewer;
 import java.util.List;
 
 /**
- * One complete frame of tile updates (all parts joined), decoded to pixels. Patches are applied in order.
- * The {@code argb} arrays are handed over from the decoder thread to the UI thread, not copied.
+ * One complete frame of tile updates (all parts joined), decoded to pixels; on the UDP path (v3) a batch of changed
+ * rectangles instead ({@link UdpTileDecoder}), whose {@code sequence} is the largest capture in it. Patches are
+ * applied in order. The {@code argb} arrays are handed over from the decoder thread to the UI thread, not copied.
  *
  * @param encodedBytes sum of the rectangle payload sizes of all parts, for bandwidth statistics
  */
